@@ -48,26 +48,32 @@ done
 cp -L "$busybox_source" "$STAGING/bin/busybox"
 chmod 0755 "$STAGING/bin/busybox"
 
-applets=(
-  sh ash awk basename blockdev cat clear cp cttyhack cut date dd dirname dmesg
-  echo env find grep gzip head hostname ip kill ln ls lsmod mkdir mkfifo mknod
-  modprobe mount mountpoint mv nl od poweroff ps pwd readlink reboot rm rmdir
-  sed setsid sha256sum sleep sort stat stty sync tail tee test touch tr udhcpc
-  umount uname uniq wc wget
+# Keep hard requirements limited to commands used by the production paths.
+# Other useful applets receive links when enabled by Ubuntu's BusyBox build.
+required_applets=(
+  sh ash awk blockdev cat chmod clear cp cttyhack cut dd echo grep gzip hostname
+  ip ls mdev mkdir mkfifo mknod modprobe mount reboot rm sed setsid sha256sum
+  sleep sort stat stty sync tail tee tr udhcpc umount uname wget
+)
+optional_applets=(
+  basename date dirname dmesg env find head kill ln lsmod mv nl od poweroff ps
+  pwd readlink rmdir test touch uniq wc
 )
 applet_list=$($STAGING/bin/busybox --list)
 $STAGING/bin/busybox sh -c 'set -o pipefail' \
   || die 'BusyBox ash lacks pipefail; safe streamed installation is unavailable'
-for applet in "${applets[@]}"; do
+for applet in "${required_applets[@]}"; do
   grep -qx "$applet" <<<"$applet_list" || die "required BusyBox applet is unavailable: $applet"
+done
+for applet in "${required_applets[@]}" "${optional_applets[@]}"; do
+  grep -qx "$applet" <<<"$applet_list" || continue
   case "$applet" in
     modprobe|mdev) link_dir=sbin ;;
     *) link_dir=bin ;;
   esac
   ln -s /bin/busybox "$STAGING/$link_dir/$applet"
 done
-# mdev is intentionally installed for per-event hotplug only; PID 1 never runs mdev -s.
-if grep -qx mdev <<<"$applet_list"; then ln -s /bin/busybox "$STAGING/sbin/mdev"; fi
+# mdev is installed for per-event hotplug only; PID 1 never runs mdev -s.
 
 rsync -aH "$PROJECT_ROOT/src/initramfs/" "$STAGING/"
 chmod 0755 "$STAGING/init" "$STAGING/etc/udhcpc.script" "$STAGING/usr/bin/"*

@@ -359,7 +359,9 @@ sync
 save_networkmanager_profile || true
 
 # Release the ISO filesystem before asking for physical media removal.
-if mountpoint -q "$MEDIA_MOUNT" 2>/dev/null; then umount "$MEDIA_MOUNT" 2>/dev/null || true; fi
+if grep -q " $MEDIA_MOUNT " /proc/mounts 2>/dev/null; then
+  umount "$MEDIA_MOUNT" 2>/dev/null || true
+fi
 echo
 echo 'Installation completed and all writes were synchronized.'
 echo 'Remove the MicroUbuntu installer media now.'
