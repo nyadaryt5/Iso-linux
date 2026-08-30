@@ -88,7 +88,7 @@ else
   # the compressed raw image, so it is the most likely deliverable to hit it.
   max_bytes=$((WIFI_ISO_MAX_MIB * 1024 * 1024))
   (( iso_bytes <= max_bytes )) || die \
-    "Wi-Fi ISO is $(human_size "$iso_bytes"), above the ${WIFI_ISO_MAX_MIB} MiB ceiling needed to stay under GitHub's 2 GiB per-asset release limit"
+    "Wi-Fi ISO is ${iso_bytes} bytes ($(human_size "$iso_bytes")), above the ${WIFI_ISO_MAX_MIB} MiB ceiling needed to stay under GitHub's 2 GiB per-asset release limit"
 fi
 sha256sum "$output" > "$OUT_DIR/$(basename "$output").sha256"
 write_checksums

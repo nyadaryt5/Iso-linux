@@ -88,6 +88,8 @@ Android terminal environments such as Termux can run the same `sha256sum` comman
 
 The raw image has GPT partitions for BIOS GRUB, a FAT32 EFI System Partition, and an ext4 root. It contains Ubuntu/systemd, apt, NetworkManager, the `micro` user with sudo access, the GA kernel, Python, build tools, Git, curl, wget, CA certificates, the SSH client, rsync, jq, Wi-Fi tools, and firmware.
 
+To stay under GitHub's 2 GiB per-asset release limit, the image ships with `linux-image-generic` (kernel plus base and extra modules) but without the `linux-headers-generic` metapackage, and `linux-firmware` is trimmed to the common laptop families listed above plus Intel/AMD GPU and Realtek NIC basics. On the installed system, kernel headers and the full firmware set are one command away: `sudo apt-get install linux-headers-generic linux-firmware`.
+
 A one-time local-console autologin reaches the first-login chooser. It shows exactly:
 
 1. Terminal-based system

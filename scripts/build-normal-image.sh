@@ -113,8 +113,12 @@ EOF
 
 log 'Installing the terminal system, kernel, bootloaders, networking, firmware, and developer tools'
 chroot "$ROOT_MOUNT" apt-get update
+# linux-image-generic already pulls the GA kernel plus its base and extra
+# module sets; the linux-headers metapackage (~500 MiB installed) is left out
+# to keep the compressed image and the Wi-Fi ISO under GitHub's 2 GiB release
+# limit. Users who need kernel development can install linux-headers-generic.
 chroot "$ROOT_MOUNT" apt-get install -y --no-install-recommends \
-  ubuntu-minimal systemd-sysv dbus kmod udev initramfs-tools linux-generic \
+  ubuntu-minimal systemd-sysv dbus kmod udev initramfs-tools linux-image-generic \
   grub2-common grub-pc-bin grub-efi-amd64-bin efibootmgr \
   network-manager netplan.io wpasupplicant iw rfkill wireless-regdb linux-firmware \
   busybox-static sudo python3 python3-venv python3-pip build-essential \
@@ -126,6 +130,25 @@ cat > "$ROOT_MOUNT/etc/default/locale" <<'EOF'
 LANG=en_US.UTF-8
 LC_ALL=en_US.UTF-8
 EOF
+
+# Keep the firmware that common amd64 laptops need (Wi-Fi families covered by
+# the installer, Realtek NICs, Intel/AMD GPU basics, wireless regulatory) and
+# drop the rest of linux-firmware (SOF/AVS audio-DSP, phone SoCs, server NICs,
+# ...). This keeps the compressed raw image and the Wi-Fi ISO under GitHub's
+# 2 GiB release-asset limit; the full firmware set is one `apt-get install
+# linux-firmware` away on the installed system.
+log 'Trimming linux-firmware to common laptop families'
+cat > "$ROOT_MOUNT/usr/local/sbin/trim-firmware" <<'TRIMFW'
+#!/bin/sh
+set -e
+cd /lib/firmware
+keep_re='\./(iwlwifi-[^/]*\.ucode|ath9k_htc|ath9k|ath10k|ath11k|brcm|cypress|rtw88|rtw89|rtlwifi|rtl_nic|rtl_bt|mediatek|amdgpu|radeon|i915|tigon|bnx2|regulatory\.db\.p7s|regulatory\.db|intel/i915)(/.*)?$'
+find . -mindepth 1 \( -type f -o -type l \) ! -regex "$keep_re" -delete
+find . -depth -type d -empty -delete
+TRIMFW
+chmod 0755 "$ROOT_MOUNT/usr/local/sbin/trim-firmware"
+chroot "$ROOT_MOUNT" /usr/local/sbin/trim-firmware
+rm -f "$ROOT_MOUNT/usr/local/sbin/trim-firmware"
 
 log 'Installing MicroUbuntu applications and persistent policy defaults'
 rsync -aH "$PROJECT_ROOT/src/normal/" "$ROOT_MOUNT/"
