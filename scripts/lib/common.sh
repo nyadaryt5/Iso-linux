@@ -102,7 +102,9 @@ wait_for_path() {
 safe_umount() {
   local path=$1
   if mountpoint -q "$path" 2>/dev/null; then
-    umount "$path"
+    # --rbind /dev also brings along pts, shm, mqueue, and other nested
+    # mounts. Recursive unmounting is required before the loop can detach.
+    umount --recursive "$path"
   fi
 }
 
