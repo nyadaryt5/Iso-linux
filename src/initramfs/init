@@ -1,0 +1,68 @@
+#!/bin/sh
+# MicroUbuntu PID 1. Every path ends in the recovery loop: PID 1 never exits.
+set +e
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export HOME=/root
+export TERM=${TERM:-linux}
+umask 022
+
+mount -t proc -o nosuid,noexec,nodev proc /proc 2>/dev/null
+mount -t sysfs -o nosuid,noexec,nodev sysfs /sys 2>/dev/null
+mount -t devtmpfs -o nosuid,mode=0755 devtmpfs /dev 2>/dev/null
+[ -c /dev/console ] || mknod -m 0600 /dev/console c 5 1 2>/dev/null
+[ -c /dev/tty ] || mknod -m 0666 /dev/tty c 5 0 2>/dev/null
+[ -c /dev/tty0 ] || mknod -m 0620 /dev/tty0 c 4 0 2>/dev/null
+[ -c /dev/tty1 ] || mknod -m 0620 /dev/tty1 c 4 1 2>/dev/null
+[ -c /dev/null ] || mknod -m 0666 /dev/null c 1 3 2>/dev/null
+[ -c /dev/urandom ] || mknod -m 0666 /dev/urandom c 1 9 2>/dev/null
+mount -t tmpfs -o nosuid,nodev,mode=0755 tmpfs /run 2>/dev/null
+mount -t tmpfs -o nosuid,nodev,mode=1777 tmpfs /tmp 2>/dev/null
+mkdir -p /run/lock /run/media /root
+hostname micro-ubuntu 2>/dev/null
+
+# Per-device mdev hotplug is safe; deliberately do not run the unbounded
+# early-boot "mdev -s" scan that can hang on old laptop firmware.
+[ -w /proc/sys/kernel/hotplug ] && printf '/sbin/mdev\n' > /proc/sys/kernel/hotplug
+
+profile=compact
+install_mode=
+test_mode=
+for argument in $(cat /proc/cmdline 2>/dev/null); do
+  case "$argument" in
+    micro.profile=*) profile=${argument#micro.profile=} ;;
+    install=network|install=bundled) install_mode=${argument#install=} ;;
+    micro.test=*) test_mode=${argument#micro.test=} ;;
+  esac
+done
+printf '%s\n' "$profile" > /run/micro-profile
+
+/usr/bin/load-hardware "$profile" 2>/dev/null || true
+clear 2>/dev/null || true
+cat /etc/issue 2>/dev/null || true
+printf 'MICROUBUNTU_READY profile=%s pid1=%s\n' "$profile" "$$"
+# Keep tty0 as the physical controlling console while mirroring deterministic
+# readiness markers to serial for QEMU diagnostics.
+if [ -c /dev/ttyS0 ]; then
+  printf 'MICROUBUNTU_READY profile=%s pid1=%s\nMICROUBUNTU_MENU_READY\n' \
+    "$profile" "$$" > /dev/ttyS0 2>/dev/null || true
+fi
+
+if [ -n "$test_mode" ]; then
+  /usr/bin/normal-install --test "$test_mode" || true
+elif [ -n "$install_mode" ]; then
+  /usr/bin/normal-install "$install_mode" || true
+fi
+
+# Never exec the menu from PID 1. A console error, EOF, or failed command must
+# return here rather than causing "Attempted to kill init".
+while :; do
+  if [ -c /dev/console ]; then
+    setsid cttyhack /usr/bin/micro-menu </dev/console >/dev/console 2>&1 || true
+  elif [ -c /dev/tty1 ]; then
+    setsid cttyhack /usr/bin/micro-menu </dev/tty1 >/dev/tty1 2>&1 || true
+  else
+    /usr/bin/micro-menu || true
+  fi
+  printf 'Menu exited; entering recovery loop and restarting it.\n'
+  sleep 1
+done

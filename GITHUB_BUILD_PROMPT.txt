@@ -1,0 +1,122 @@
+# Prompt for GitHub Copilot Agent / GitHub Actions
+
+Copy everything in the block below into GitHub Copilot Agent after opening the MicroUbuntu repository.
+
+---
+
+You are completing the MicroUbuntu project in this repository. Work directly in the repository, inspect all existing scripts before changing them, and run the build and boot tests rather than only describing changes.
+
+## Goal
+
+Create two usable amd64 deliverables:
+
+1. `micro-ubuntu-bootstrap.iso`: a compact bootable network bootstrap ISO targeted at approximately 20 MiB. It must have exactly two GRUB entries:
+   - `MicroUbuntu - Temporary session`
+   - `MicroUbuntu - Normal installation (Ubuntu terminal system)`
+
+2. `micro-ubuntu-wifi-installer.iso`: a larger Wi-Fi-capable installer ISO. It may be hundreds of MiB or larger. It must also have exactly those same two boot entries.
+
+The small ISO is allowed to download the normal system. The larger ISO must include the Wi-Fi userspace, kernel modules, and firmware needed for common laptop adapters. Do not fake Wi-Fi support by only adding a menu item.
+
+## Required installation behavior
+
+### Temporary session
+
+- Boots a terminal MicroUbuntu session from RAM.
+- Does not modify any disk.
+- Works on older HP laptops and does not require a serial console.
+- Uses `console=tty0`, not only `console=ttyS0`.
+- Uses an older, broadly compatible Ubuntu GA kernel if that is needed for hardware compatibility.
+- PID 1 must never exit. If a menu or console command fails, keep a rescue shell or recovery loop alive instead of causing `Attempted to kill init`.
+- Initialize `/dev/console`, `/dev/tty0`, `/dev/tty1`, keyboard, block devices, and network devices safely. Do not run an unbounded `mdev` scan during early boot.
+
+### Normal installation
+
+- Requires an Internet connection for the network installation path.
+- Must not ask the user to host or manually type an arbitrary image URL in the normal release build.
+- Use an official open-source Ubuntu image or a signed image artifact produced by this repository. Verify its SHA-256 before writing it.
+- For the compact bootstrap ISO, use a build-time-configured GitHub Release asset URL for a compressed raw image, for example:
+  `https://github.com/OWNER/REPOSITORY/releases/latest/download/micro-ubuntu-full.img.gz`
+  Do not leave `OWNER/REPOSITORY` in a release build; fail the build if it was not configured.
+- For the Wi-Fi ISO, either bundle the compressed normal image or use a clearly documented official source.
+- Ask the user to select a whole target disk from a numbered list.
+- Clearly warn that the selected disk will be erased.
+- Require the user to type exactly `INSTALL` before writing.
+- Support BIOS and UEFI booting on amd64.
+- Write the image safely, sync it, and reboot only after the user removes the installer media.
+- Handle disks named `/dev/sda`, `/dev/vda`, `/dev/nvme0n1`, and `/dev/mmcblk0` correctly.
+- Do not assume the installer has Ethernet only. For the Wi-Fi installer, provide a terminal Wi-Fi setup screen using `iwd` or `wpa_supplicant`, `iw`, `rfkill`, and NetworkManager-compatible configuration. Scan networks, let the user select an SSID, read a password without echoing it, connect, obtain DHCP, and show an error with a retry option if the connection fails.
+- Include common open-source Wi-Fi drivers and firmware from Ubuntu packages. At minimum investigate `iwlwifi`, `ath9k`, `ath10k`, `ath11k`, `brcmfmac`, `b43`, `rtw88`, and `rtw89`. Do not include proprietary Broadcom `wl` unless clearly marked optional; prefer open-source drivers and firmware.
+- Because the user has an HP laptop and a Broadcom USB device was visible in their boot log, make sure Broadcom open firmware and Bluetooth dependencies are considered, but do not assume the USB Bluetooth device is the Wi-Fi adapter.
+
+## Installed normal system
+
+The installed system must initially be terminal-first and persistent:
+
+- Ubuntu-based amd64 system with systemd, apt, networking, a regular `micro` user, sudo, a kernel, and BIOS/UEFI bootloader support.
+- Include Python, development tools, Git, curl, wget, certificates, SSH client, rsync, jq, and NetworkManager.
+- Install MicroAI, MicroHermes, Browser Agent, persistent settings, provider configuration, local-model support, and persistent model/browser/Hermes directories.
+- Keep `AI_RUN_AS_ROOT` disabled by default. Require explicit `ENABLE POWER MODE` confirmation before privileged AI actions. If the existing project has a safer equivalent, preserve it.
+- On first login show exactly these meaningful choices:
+  1. Terminal-based system
+  2. Build graphical interface
+  3. Decide later
+- The graphical interface is not required in the initial terminal image. Provide a verified `gui-builder --light` and `gui-builder --full` path. The light path may install Xorg/Openbox/Xterm; the full path may install Ubuntu Desktop Minimal. Make the next boot graphical only after successful installation.
+- The AI may invoke the GUI builder only after the user explicitly enables the appropriate command/power policy.
+
+## Build and compression
+
+- The compact ISO must target approximately 20 MiB. Do not include `qemu-img`, a full Ubuntu root filesystem, or a desktop in the compact ISO. It should download a compressed raw release asset and stream-decompress it directly to the target disk.
+- Use gzip or zstd consistently. If BusyBox is used in the compact initramfs, include the decompressor applet and test it.
+- Do not call a QCow2 image a raw image. If the source is QCow2, convert it during the GitHub build and publish the resulting raw compressed asset.
+- The larger Wi-Fi installer can contain a full image and all Wi-Fi packages. It does not have the 20 MiB restriction.
+- Use sparse files where possible, but verify that an uploaded artifact or ISO does not expand unexpectedly.
+- Generate SHA256SUMS for every published ISO and image asset.
+
+## GitHub Actions
+
+Add or repair workflows under `.github/workflows/`:
+
+- `build-micro-ubuntu.yml` triggered by `workflow_dispatch`, pushes to the main branch, and version tags.
+- Use an Ubuntu runner with enough disk space. Print disk space before building and fail early with a useful message if less than 25 GiB is available.
+- Install all dependencies noninteractively.
+- Build the normal terminal image first, then build the tiny profile, then build both installer variants.
+- If loop devices are needed, explicitly test that `losetup`, partition scanning, mounting, `mkfs.ext4`, `sfdisk`, and `grub-install` work on the runner. Clean up all mounts and loop devices with a trap.
+- Upload ISO files, compressed image assets, and SHA256SUMS as workflow artifacts.
+- On version tags, publish them as GitHub Release assets.
+- Never put passwords, API keys, or tokens in the repository, ISO, logs, workflow YAML, or artifacts.
+- Do not require GitHub credentials inside the booted ISO. GitHub is only the public build/release location.
+
+## Required tests before declaring success
+
+Run all of the following and attach their output to the workflow summary:
+
+- `bash -n` on every builder.
+- `sh -n` on every POSIX shell source file.
+- Python compilation checks.
+- Inspect each ISO's GRUB configuration and assert exactly two `menuentry` lines with the required names.
+- Verify every SHA256SUMS entry.
+- Boot each ISO in QEMU in BIOS mode with `-nographic` and a serial test configuration; confirm that PID 1 reaches a menu and that no output contains `Kernel panic` or `Attempted to kill init`.
+- Boot each ISO in QEMU UEFI mode if OVMF is available.
+- Exercise the normal installer in a disposable QEMU disk. Never test destructive installation against the runner's real root disk.
+- Test canceling before typing `INSTALL`; it must not write the disk.
+- Test that a wrong checksum or failed download is rejected.
+- Test that a failed Wi-Fi connection returns to a retry/menu screen.
+
+## Documentation
+
+Update README.md with:
+
+- The difference between the 20 MiB compact bootstrap ISO and the larger Wi-Fi installer.
+- Exact download and flashing instructions for EtchDroid.
+- A warning that normal installation erases the selected disk.
+- The required Internet connection and Wi-Fi setup behavior.
+- The first-login terminal/graphical workflow.
+- How to verify SHA256SUMS.
+- How to run the GitHub Actions build and download the artifacts.
+
+Do not claim that an ISO was physically tested on the user's laptop unless it actually was. Report QEMU results separately from physical-hardware results. Fix failures instead of hiding them behind `|| true`.
+
+When finished, provide the ISO artifact names, sizes, checksums, QEMU test results, and any remaining hardware-specific limitations.
+
+---

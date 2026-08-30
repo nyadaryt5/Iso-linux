@@ -1,0 +1,51 @@
+#!/bin/sh
+# Add a graphical interface to the persistent terminal image.
+set -eu
+
+usage() {
+  echo 'Usage: gui-builder --light | --full' >&2
+  exit 2
+}
+
+case "${1:-}" in
+  --light) profile=light ;;
+  --full) profile=full ;;
+  *) usage ;;
+esac
+[ "$#" -eq 1 ] || usage
+
+# Calls originating from MicroAI carry this marker. A human invoking the
+# command directly still authenticates through sudo in the normal way.
+if [ "${MICRO_AI_INVOKED:-0}" = 1 ]; then
+  /usr/local/bin/micro-power --check || {
+    echo 'AI GUI installation is blocked. Explicitly enable power mode first.' >&2
+    exit 77
+  }
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+  exec sudo --preserve-env=MICRO_AI_INVOKED /usr/local/bin/gui-builder "$1"
+fi
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+case "$profile" in
+  light)
+    apt-get install -y --no-install-recommends xorg openbox xterm lightdm network-manager-gnome
+    command -v startx >/dev/null 2>&1
+    command -v openbox-session >/dev/null 2>&1
+    command -v lightdm >/dev/null 2>&1
+    systemctl enable lightdm.service
+    ;;
+  full)
+    apt-get install -y ubuntu-desktop-minimal
+    systemctl enable gdm3.service
+    ;;
+esac
+
+# Never switch the next boot to graphics until package installation and the
+# display-manager checks above have all succeeded.
+systemctl set-default graphical.target
+install -d -m 0755 /var/lib/micro-ubuntu
+printf '%s\n' "$profile" > /var/lib/micro-ubuntu/gui-profile
+printf 'Graphical profile "%s" installed successfully. Next boot is graphical.\n' "$profile"

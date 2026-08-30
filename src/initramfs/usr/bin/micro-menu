@@ -1,0 +1,49 @@
+#!/bin/sh
+set +e
+profile=$(cat /run/micro-profile 2>/dev/null || echo compact)
+
+while :; do
+  clear 2>/dev/null || true
+  cat <<EOF
+=============================================
+       MicroUbuntu Temporary RAM Session
+=============================================
+Profile: $profile
+No disk is mounted and this menu does not write to storage.
+
+1) Open rescue terminal
+2) Configure network
+3) Show network status
+4) Show detected disks (read-only information)
+5) Reboot
+EOF
+  [ "$profile" = wifi ] && echo '6) Scan and connect to Wi-Fi'
+  echo '0) Refresh menu'
+  echo 'MICROUBUNTU_MENU_READY'
+  printf 'Choose: '
+  IFS= read -r choice || return 0
+  case "$choice" in
+    1)
+      echo 'Type exit to return. No disk has been mounted automatically.'
+      /bin/sh
+      ;;
+    2) /usr/bin/network-setup menu; printf 'Press Enter to continue... '; IFS= read -r _ ;;
+    3) ip addr; ip route; printf 'Press Enter to continue... '; IFS= read -r _ ;;
+    4)
+      for disk in /sys/block/sd* /sys/block/vd* /sys/block/nvme*n* /sys/block/mmcblk*; do
+        [ -e "$disk/size" ] || continue
+        sectors=$(cat "$disk/size" 2>/dev/null)
+        printf '/dev/%s: %s MiB\n' "${disk##*/}" "$((sectors / 2048))"
+      done
+      printf 'Press Enter to continue... '; IFS= read -r _
+      ;;
+    5)
+      echo 'Remove the installer media, then type REBOOT.'
+      IFS= read -r answer
+      [ "$answer" = REBOOT ] && { sync; reboot -f; }
+      ;;
+    6) [ "$profile" = wifi ] && /usr/bin/wifi-setup; printf 'Press Enter to continue... '; IFS= read -r _ ;;
+    0) ;;
+    *) echo 'Invalid choice.'; sleep 1 ;;
+  esac
+done

@@ -1,0 +1,56 @@
+#!/bin/sh
+# Persist provider/model choices without persisting credentials.
+set -eu
+
+config_dir="$HOME/.config/micro-ubuntu"
+config="$config_dir/ai.conf"
+provider=api
+api_url=https://api.openai.com/v1/chat/completions
+api_model=gpt-4o-mini
+local_url=http://127.0.0.1:11434/v1/chat/completions
+local_model=llama3.2:1b
+
+read_value() {
+  key=$1 file=$2
+  sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+for source_file in /etc/micro-ubuntu/ai.conf "$config"; do
+  [ -r "$source_file" ] || continue
+  value=$(read_value AI_PROVIDER "$source_file"); [ -z "$value" ] || provider=$value
+  value=$(read_value AI_API_URL "$source_file"); [ -z "$value" ] || api_url=$value
+  value=$(read_value AI_API_MODEL "$source_file"); [ -z "$value" ] || api_model=$value
+  value=$(read_value AI_LOCAL_URL "$source_file"); [ -z "$value" ] || local_url=$value
+  value=$(read_value AI_LOCAL_MODEL "$source_file"); [ -z "$value" ] || local_model=$value
+done
+
+printf 'Provider (api/local) [%s]: ' "$provider"
+IFS= read -r value; [ -z "$value" ] || provider=$value
+case "$provider" in api|local) ;; *) echo 'Provider must be api or local.' >&2; exit 2 ;; esac
+printf 'API endpoint [%s]: ' "$api_url"
+IFS= read -r value; [ -z "$value" ] || api_url=$value
+printf 'API model [%s]: ' "$api_model"
+IFS= read -r value; [ -z "$value" ] || api_model=$value
+printf 'Local OpenAI-compatible endpoint [%s]: ' "$local_url"
+IFS= read -r value; [ -z "$value" ] || local_url=$value
+printf 'Local model [%s]: ' "$local_model"
+IFS= read -r value; [ -z "$value" ] || local_model=$value
+if printf '%s' "$api_url $local_url" | grep -q '[^A-Za-z0-9/:._?=%+&-]'; then
+  echo 'Endpoint contains unsupported characters.' >&2
+  exit 2
+fi
+if printf '%s' "$api_model $local_model" | grep -q '[^A-Za-z0-9/_.:+-]'; then
+  echo 'Model name contains unsupported characters.' >&2
+  exit 2
+fi
+
+mkdir -p "$config_dir"
+umask 077
+cat > "$config" <<EOF
+AI_PROVIDER=$provider
+AI_API_URL=$api_url
+AI_API_MODEL=$api_model
+AI_LOCAL_URL=$local_url
+AI_LOCAL_MODEL=$local_model
+AI_RUN_AS_ROOT=0
+EOF
+printf 'Configuration saved to %s. API keys are never written to disk.\n' "$config"

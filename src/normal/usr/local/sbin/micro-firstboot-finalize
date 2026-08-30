@@ -1,0 +1,18 @@
+#!/bin/sh
+# Root-only helper for completing the one-time local-console account setup.
+set -eu
+
+[ "$(id -u)" -eq 0 ] || { echo 'micro-firstboot-finalize must run as root.' >&2; exit 1; }
+[ -e /var/lib/micro-ubuntu/needs-password ] || exit 0
+
+if ! passwd micro; then
+  echo 'Password was not changed.' >&2
+  exit 1
+fi
+
+rm -f /var/lib/micro-ubuntu/needs-password
+rm -f /etc/sudoers.d/90-micro-firstboot
+rm -f /etc/systemd/system/getty@tty1.service.d/autologin.conf
+rmdir /etc/systemd/system/getty@tty1.service.d 2>/dev/null || true
+systemctl daemon-reload 2>/dev/null || true
+printf 'Password saved. Future logins require it; one-time autologin is disabled.\n'

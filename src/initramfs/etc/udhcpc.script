@@ -1,0 +1,25 @@
+#!/bin/sh
+# BusyBox udhcpc event hook.
+set +e
+case "$1" in
+  deconfig)
+    ip addr flush dev "$interface"
+    ip link set "$interface" up
+    ;;
+  bound|renew)
+    ip addr flush dev "$interface"
+    ip addr add "$ip/${mask:-24}" dev "$interface"
+    ip link set "$interface" up
+    if [ -n "${router:-}" ]; then
+      ip route del default 2>/dev/null
+      for gateway in $router; do
+        ip route add default via "$gateway" dev "$interface" && break
+      done
+    fi
+    : > /etc/resolv.conf
+    for server in ${dns:-}; do
+      printf 'nameserver %s\n' "$server" >> /etc/resolv.conf
+    done
+    ;;
+esac
+exit 0

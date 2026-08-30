@@ -1,0 +1,13 @@
+# Build products are published by GitHub Actions, not committed.
+build/
+*.img
+*.img.gz
+*.iso
+SHA256SUMS
+
+# Test and editor noise
+__pycache__/
+*.py[cod]
+*.log
+.idea/
+.vscode/

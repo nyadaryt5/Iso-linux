@@ -1,0 +1,44 @@
+#!/bin/sh
+# Load a curated set, then resolve only a bounded number of existing modaliases.
+# This avoids an unbounded userspace device scan during early boot.
+set +e
+profile=${1:-compact}
+
+for module in \
+  atkbd i8042 serio_raw hid hid_generic usbhid \
+  ahci ata_piix nvme mmc_block sdhci sdhci_pci usb_storage uas \
+  xhci_pci ehci_pci ohci_pci uhci_hcd \
+  virtio_pci virtio_blk virtio_net \
+  e1000 e1000e igb igc r8169 tg3 bnx2 atl1c alx sky2 forcedeth; do
+  modprobe -q "$module" 2>/dev/null || true
+done
+
+if [ "$profile" = wifi ]; then
+  for module in \
+    cfg80211 mac80211 rfkill \
+    iwlwifi iwldvm iwlmvm \
+    ath9k ath9k_htc ath10k_pci ath10k_usb ath11k_pci \
+    brcmfmac b43 bcma ssb \
+    rtw88_pci rtw88_usb rtw89_pci \
+    btusb bluetooth; do
+    modprobe -q "$module" 2>/dev/null || true
+  done
+fi
+
+count=0
+for alias_file in \
+  /sys/bus/pci/devices/*/modalias \
+  /sys/bus/usb/devices/*/modalias \
+  /sys/bus/sdio/devices/*/modalias \
+  /sys/bus/platform/devices/*/modalias; do
+  [ -r "$alias_file" ] || continue
+  IFS= read -r alias < "$alias_file"
+  [ -z "$alias" ] || modprobe -q "$alias" 2>/dev/null || true
+  count=$((count + 1))
+  [ "$count" -ge 256 ] && break
+done
+
+# Give asynchronously probed storage and network devices a bounded settling
+# interval; devtmpfs creates their nodes without a global mdev scan.
+sleep 2
+exit 0
