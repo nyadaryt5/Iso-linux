@@ -9,7 +9,7 @@ enable_error_report
 
 require_root
 require_commands debootstrap sgdisk losetup mkfs.ext4 mkfs.vfat mount umount mountpoint \
-  chroot blkid e2fsck gzip sha256sum rsync flock
+  chroot blkid readelf python3 gzip sha256sum rsync flock
 ensure_dirs
 
 LOCK_FILE="$BUILD_DIR/.normal-image.lock"
@@ -194,6 +194,43 @@ grep -q '^menuentry ' "$ROOT_MOUNT/boot/grub/grub.cfg" || die 'installed-system 
 chroot "$ROOT_MOUNT" dpkg-query -W -f='${Package}\t${Version}\n' \
   | sort > "$OUT_DIR/micro-ubuntu-package-manifest.txt"
 
+# Cache only the installed-system files needed to assemble initramfs images.
+# This avoids detaching and repeatedly remounting the raw image read-only;
+# hosted-runner loop partition nodes can be stale briefly after reattachment.
+log 'Caching kernel, modules, firmware, BusyBox, and Wi-Fi runtime libraries'
+rm -rf "$SYSTEM_SOURCE_DIR"
+mkdir -p "$SYSTEM_SOURCE_DIR"/{boot,bin,etc/ssl/certs,lib/modules,lib/firmware,usr/bin,usr/sbin}
+kernel_file=$(find "$ROOT_MOUNT/boot" -maxdepth 1 -type f -name 'vmlinuz-*-generic' | sort -V | tail -n 1)
+[[ -n $kernel_file ]] || die 'no generic kernel was installed'
+kernel_version=${kernel_file##*/vmlinuz-}
+cp "$kernel_file" "$SYSTEM_SOURCE_DIR/boot/"
+printf '%s\n' "$kernel_version" > "$SYSTEM_SOURCE_DIR/kernel-version"
+rsync -aH "$ROOT_MOUNT/lib/modules/$kernel_version/" \
+  "$SYSTEM_SOURCE_DIR/lib/modules/$kernel_version/"
+rsync -aH "$ROOT_MOUNT/lib/firmware/" "$SYSTEM_SOURCE_DIR/lib/firmware/"
+cp "$ROOT_MOUNT/etc/ssl/certs/ca-certificates.crt" "$SYSTEM_SOURCE_DIR/etc/ssl/certs/"
+for busybox_path in "$ROOT_MOUNT/bin/busybox" "$ROOT_MOUNT/usr/bin/busybox"; do
+  if [[ -x $busybox_path ]]; then
+    cp -L "$busybox_path" "$SYSTEM_SOURCE_DIR/bin/busybox"
+    break
+  fi
+done
+[[ -x "$SYSTEM_SOURCE_DIR/bin/busybox" ]] || die 'busybox-static was not installed'
+wifi_runtime_paths=()
+for command_name in iw rfkill wpa_supplicant wpa_cli wpa_passphrase; do
+  command_path=
+  for prefix in /usr/bin /usr/sbin /bin /sbin; do
+    if [[ -x "$ROOT_MOUNT$prefix/$command_name" ]]; then
+      command_path="$prefix/$command_name"
+      break
+    fi
+  done
+  [[ -n $command_path ]] || die "Wi-Fi command was not installed: $command_name"
+  wifi_runtime_paths+=("$command_path")
+done
+python3 "$SCRIPT_DIR/copy_elf.py" --root "$ROOT_MOUNT" --dest "$SYSTEM_SOURCE_DIR" \
+  "${wifi_runtime_paths[@]}"
+
 # Keep apt itself functional while removing only regenerable build residue.
 chroot "$ROOT_MOUNT" apt-get clean
 rm -rf "$ROOT_MOUNT/var/lib/apt/lists/"* "$ROOT_MOUNT/tmp/"* "$ROOT_MOUNT/var/tmp/"*
@@ -207,13 +244,6 @@ sync
 # Unmount before compression and suppress cleanup attempts for detached state.
 for path in run dev/pts dev sys proc boot/efi; do safe_umount "$ROOT_MOUNT/$path"; done
 safe_umount "$ROOT_MOUNT"
-# Validate and cleanly close ext4 before hashing/compressing the release asset.
-if e2fsck -pf "$ROOT_PART"; then
-  :
-else
-  fsck_status=$?
-  (( fsck_status == 1 )) || die "final ext4 check failed with status $fsck_status"
-fi
 losetup -d "$LOOP_DEVICE"
 LOOP_DEVICE=
 

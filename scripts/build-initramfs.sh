@@ -8,8 +8,7 @@ source "$SCRIPT_DIR/lib/common.sh"
 enable_error_report
 
 require_root
-require_commands losetup mount umount mountpoint cpio gzip depmod modinfo readelf \
-  blkid python3 rsync sha256sum
+require_commands cpio gzip depmod modinfo readelf python3 rsync sha256sum
 ensure_dirs
 
 PROFILE=${1:-}
@@ -22,33 +21,15 @@ if [[ $PROFILE == compact ]]; then
     'IMAGE_URL must be a configured HTTPS release-asset URL (no OWNER/REPOSITORY placeholder)'
 fi
 
-MOUNT_DIR="$WORK_DIR/image-source-$PROFILE"
+MOUNT_DIR="$SYSTEM_SOURCE_DIR"
 STAGING="$WORK_DIR/initramfs-$PROFILE"
 INITRAMFS_OUT="$WORK_DIR/initramfs-$PROFILE.gz"
 KERNEL_OUT="$WORK_DIR/vmlinuz-$PROFILE"
-LOOP_DEVICE=
 
-cleanup() {
-  local status=$?
-  set +e
-  safe_umount "$MOUNT_DIR"
-  [[ -z ${LOOP_DEVICE:-} ]] || losetup -d "$LOOP_DEVICE" 2>/dev/null || true
-  exit "$status"
-}
-trap cleanup EXIT INT TERM
-
-rm -rf "$MOUNT_DIR" "$STAGING" "$INITRAMFS_OUT" "$KERNEL_OUT"
-mkdir -p "$MOUNT_DIR" "$STAGING"
-# The normal-image builder runs a final e2fsck before compression. Keep this
-# loop read-only so assembling an ISO cannot mutate the published raw payload.
-LOOP_DEVICE=$(losetup --find --show --read-only --partscan "$RAW_IMAGE")
-ROOT_PART=$(partition_path "$LOOP_DEVICE" 3)
-wait_for_path "$ROOT_PART" || die "image root partition $ROOT_PART did not appear"
-root_type=$(blkid -s TYPE -o value "$ROOT_PART" 2>/dev/null || true)
-[[ $root_type == ext4 ]] || die "expected ext4 on $ROOT_PART, found '${root_type:-unknown}'"
-if ! mount -t ext4 -o ro,noload "$ROOT_PART" "$MOUNT_DIR"; then
-  die "could not mount $ROOT_PART from $RAW_IMAGE read-only after its final e2fsck"
-fi
+[[ -r "$MOUNT_DIR/kernel-version" ]] || die \
+  "installed-system source cache is missing: $MOUNT_DIR (rebuild the normal image)"
+rm -rf "$STAGING" "$INITRAMFS_OUT" "$KERNEL_OUT"
+mkdir -p "$STAGING"
 
 kernel_file=$(find "$MOUNT_DIR/boot" -maxdepth 1 -type f -name 'vmlinuz-*-generic' | sort -V | tail -n 1)
 [[ -n $kernel_file ]] || die 'no generic Ubuntu kernel found in the normal image'

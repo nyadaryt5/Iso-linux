@@ -5,6 +5,7 @@ PROJECT_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 BUILD_DIR=${BUILD_DIR:-"$PROJECT_ROOT/build"}
 WORK_DIR=${WORK_DIR:-"$BUILD_DIR/work"}
 OUT_DIR=${OUT_DIR:-"$BUILD_DIR/out"}
+SYSTEM_SOURCE_DIR=${SYSTEM_SOURCE_DIR:-"$WORK_DIR/system-source"}
 CONFIG_FILE=${CONFIG_FILE:-"$PROJECT_ROOT/config/build.env"}
 
 if [[ -r "$CONFIG_FILE" ]]; then
