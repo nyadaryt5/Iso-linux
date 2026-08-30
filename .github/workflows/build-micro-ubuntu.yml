@@ -1,1 +1,146 @@
+name: Build MicroUbuntu images
 
+on:
+  workflow_dispatch:
+    inputs:
+      image_url:
+        description: Optional immutable HTTPS URL for the compressed raw release asset
+        required: false
+        type: string
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: micro-ubuntu-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and boot-test amd64 deliverables
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      TZ: UTC
+      GITHUB_REPOSITORY: ${{ github.repository }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Reclaim runner disk space
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo 'Disk space before cleanup:'
+          df -hP /
+          for path in /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL; do
+            if [[ -e "$path" ]]; then
+              sudo rm -rf --one-file-system "$path"
+            fi
+          done
+          sudo apt-get clean
+          echo 'Disk space after cleanup:'
+          df -hP /
+
+      - name: Install build and test dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            debootstrap gdisk dosfstools e2fsprogs util-linux kmod cpio gzip pigz \
+            rsync xorriso grub2-common grub-pc-bin grub-efi-amd64-bin mtools \
+            qemu-system-x86 ovmf binutils file python3 shellcheck
+
+      - name: Verify runner disk and loop-device capabilities
+        run: sudo -E ./scripts/check-build-host.sh
+
+      - name: Select build-time release URL
+        id: release-url
+        shell: bash
+        env:
+          INPUT_IMAGE_URL: ${{ github.event.inputs.image_url }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -n "${INPUT_IMAGE_URL:-}" ]]; then
+            url=$INPUT_IMAGE_URL
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tag=${GITHUB_REF#refs/tags/}
+            url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/micro-ubuntu-full.img.gz"
+            echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          else
+            url="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/micro-ubuntu-full.img.gz"
+          fi
+          [[ "$url" == https://* && "$url" != *OWNER/REPOSITORY* ]]
+          echo "IMAGE_URL=$url" >> "$GITHUB_ENV"
+          echo "Compact installer URL: $url"
+
+      - name: Build normal image, compact ISO, and Wi-Fi ISO
+        shell: bash
+        run: sudo -E env SKIP_HOST_CHECK=1 ./scripts/build-all.sh
+
+      - name: Verify published checksums
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd build/out
+          sha256sum --check SHA256SUMS
+
+      - name: Add build and QEMU results to workflow summary
+        if: always()
+        shell: bash
+        run: |
+          if [[ -s build/out/BUILD-SUMMARY.md ]]; then
+            cat build/out/BUILD-SUMMARY.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '%s\n' '## MicroUbuntu build failed before a summary was produced' >> "$GITHUB_STEP_SUMMARY"
+            printf '\nDisk state at failure:\n```text\n' >> "$GITHUB_STEP_SUMMARY"
+            df -hP >> "$GITHUB_STEP_SUMMARY"
+            printf '```\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: micro-ubuntu-amd64-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          path: |
+            build/out/micro-ubuntu-bootstrap.iso
+            build/out/micro-ubuntu-wifi-installer.iso
+            build/out/micro-ubuntu-full.img.gz
+            build/out/SHA256SUMS
+            build/out/BUILD-SUMMARY.md
+            build/out/micro-ubuntu-package-manifest.txt
+            build/out/qemu-results.txt
+
+      - name: Publish version-tag release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          tag=${GITHUB_REF#refs/tags/}
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Updating existing release $tag"
+          else
+            gh release create "$tag" --verify-tag --title "MicroUbuntu $tag" \
+              --notes-file build/out/BUILD-SUMMARY.md
+          fi
+          gh release upload "$tag" --clobber \
+            build/out/micro-ubuntu-bootstrap.iso \
+            build/out/micro-ubuntu-wifi-installer.iso \
+            build/out/micro-ubuntu-full.img.gz \
+            build/out/SHA256SUMS
