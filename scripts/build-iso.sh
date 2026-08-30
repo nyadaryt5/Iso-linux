@@ -62,8 +62,14 @@ grep -Fq "menuentry 'MicroUbuntu - Normal installation (Ubuntu terminal system)'
 
 rm -f "$output"
 log "Creating $PROFILE BIOS/UEFI hybrid ISO"
-grub-mkrescue -o "$output" "$ISO_ROOT" -- \
-  -volid "$volume" -iso-level 3 -full-iso9660-filenames
+rescue_log="$WORK_DIR/grub-mkrescue-$PROFILE.log"
+if ! grub-mkrescue -o "$output" "$ISO_ROOT" -- -volid "$volume" \
+    >"$rescue_log" 2>&1; then
+  cat "$rescue_log" >&2
+  rescue_error=$(tail -n 12 "$rescue_log" | tr '\n' ' ' | tail -c 1800)
+  die "grub-mkrescue failed: $rescue_error"
+fi
+cat "$rescue_log"
 [[ -s "$output" ]] || die 'grub-mkrescue did not produce an ISO'
 
 report="$WORK_DIR/el-torito-$PROFILE.txt"
