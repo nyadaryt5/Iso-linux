@@ -9,7 +9,7 @@ enable_error_report
 
 require_root
 require_commands debootstrap sgdisk losetup mkfs.ext4 mkfs.vfat mount umount mountpoint \
-  chroot blkid gzip sha256sum rsync flock
+  chroot blkid e2fsck gzip sha256sum rsync flock
 ensure_dirs
 
 LOCK_FILE="$BUILD_DIR/.normal-image.lock"
@@ -207,6 +207,13 @@ sync
 # Unmount before compression and suppress cleanup attempts for detached state.
 for path in run dev/pts dev sys proc boot/efi; do safe_umount "$ROOT_MOUNT/$path"; done
 safe_umount "$ROOT_MOUNT"
+# Validate and cleanly close ext4 before hashing/compressing the release asset.
+if e2fsck -pf "$ROOT_PART"; then
+  :
+else
+  fsck_status=$?
+  (( fsck_status == 1 )) || die "final ext4 check failed with status $fsck_status"
+fi
 losetup -d "$LOOP_DEVICE"
 LOOP_DEVICE=
 

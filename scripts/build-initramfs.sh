@@ -9,7 +9,7 @@ enable_error_report
 
 require_root
 require_commands losetup mount umount mountpoint cpio gzip depmod modinfo readelf \
-  python3 rsync sha256sum
+  blkid python3 rsync sha256sum
 ensure_dirs
 
 PROFILE=${1:-}
@@ -39,10 +39,16 @@ trap cleanup EXIT INT TERM
 
 rm -rf "$MOUNT_DIR" "$STAGING" "$INITRAMFS_OUT" "$KERNEL_OUT"
 mkdir -p "$MOUNT_DIR" "$STAGING"
+# The normal-image builder runs a final e2fsck before compression. Keep this
+# loop read-only so assembling an ISO cannot mutate the published raw payload.
 LOOP_DEVICE=$(losetup --find --show --read-only --partscan "$RAW_IMAGE")
 ROOT_PART=$(partition_path "$LOOP_DEVICE" 3)
 wait_for_path "$ROOT_PART" || die "image root partition $ROOT_PART did not appear"
-mount -o ro "$ROOT_PART" "$MOUNT_DIR"
+root_type=$(blkid -s TYPE -o value "$ROOT_PART" 2>/dev/null || true)
+[[ $root_type == ext4 ]] || die "expected ext4 on $ROOT_PART, found '${root_type:-unknown}'"
+if ! mount -t ext4 -o ro,noload "$ROOT_PART" "$MOUNT_DIR"; then
+  die "could not mount $ROOT_PART from $RAW_IMAGE read-only after its final e2fsck"
+fi
 
 kernel_file=$(find "$MOUNT_DIR/boot" -maxdepth 1 -type f -name 'vmlinuz-*-generic' | sort -V | tail -n 1)
 [[ -n $kernel_file ]] || die 'no generic Ubuntu kernel found in the normal image'

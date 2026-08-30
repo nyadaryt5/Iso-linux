@@ -36,6 +36,13 @@ log() {
 
 die() {
   printf 'ERROR: %s\n' "$*" >&2
+  if [[ -n ${GITHUB_ACTIONS:-} ]]; then
+    local message=$*
+    message=${message//'%'/'%25'}
+    message=${message//$'\r'/'%0D'}
+    message=${message//$'\n'/'%0A'}
+    printf '::error::%s\n' "$message"
+  fi
   exit 1
 }
 
