@@ -85,23 +85,33 @@ for pair in "compact:$COMPACT_ISO" "wifi:$WIFI_ISO"; do
   echo "$name BIOS boot/menu: PASS" >> "$RESULTS"
 done
 
-ovmf=
-for candidate in \
-  /usr/share/OVMF/OVMF_CODE_4M.fd \
-  /usr/share/OVMF/OVMF_CODE.fd \
-  /usr/share/ovmf/OVMF.fd; do
-  [[ -r $candidate ]] && ovmf=$candidate && break
+ovmf_code=
+ovmf_vars=
+for pair in \
+  '/usr/share/OVMF/OVMF_CODE_4M.fd:/usr/share/OVMF/OVMF_VARS_4M.fd' \
+  '/usr/share/OVMF/OVMF_CODE.fd:/usr/share/OVMF/OVMF_VARS.fd'; do
+  code=${pair%%:*}
+  vars=${pair#*:}
+  if [[ -r $code && -r $vars ]]; then
+    ovmf_code=$code
+    ovmf_vars=$vars
+    break
+  fi
 done
-if [[ -n $ovmf ]]; then
+if [[ -n $ovmf_code ]]; then
   for pair in "compact:$COMPACT_ISO" "wifi:$WIFI_ISO"; do
     name=${pair%%:*}
     iso=${pair#*:}
+    vars_copy="$TEMP/$name-uefi-vars.fd"
+    cp "$ovmf_vars" "$vars_copy"
     run_until_marker MICROUBUNTU_MENU_READY "$TEMP/$name-uefi.log" \
-      -bios "$ovmf" -boot d -cdrom "$iso"
+      -drive "if=pflash,format=raw,unit=0,readonly=on,file=$ovmf_code" \
+      -drive "if=pflash,format=raw,unit=1,file=$vars_copy" \
+      -boot d -cdrom "$iso"
     echo "$name UEFI boot/menu: PASS" >> "$RESULTS"
   done
 else
-  echo 'UEFI ISO boot: SKIPPED (OVMF not installed)' >> "$RESULTS"
+  echo 'UEFI ISO boot: SKIPPED (OVMF code/variables not installed)' >> "$RESULTS"
 fi
 
 # Boot the installed raw image through each bootloader in snapshot mode, so
@@ -109,12 +119,16 @@ fi
 run_until_marker MICROUBUNTU_INSTALLED_READY "$TEMP/installed-bios.log" \
   -boot c -drive "file=$RAW_IMAGE,format=raw,if=virtio,snapshot=on"
 echo 'installed raw image BIOS boot: PASS' >> "$RESULTS"
-if [[ -n $ovmf ]]; then
+if [[ -n $ovmf_code ]]; then
+  installed_vars="$TEMP/installed-uefi-vars.fd"
+  cp "$ovmf_vars" "$installed_vars"
   run_until_marker MICROUBUNTU_INSTALLED_READY "$TEMP/installed-uefi.log" \
-    -bios "$ovmf" -boot c -drive "file=$RAW_IMAGE,format=raw,if=virtio,snapshot=on"
+    -drive "if=pflash,format=raw,unit=0,readonly=on,file=$ovmf_code" \
+    -drive "if=pflash,format=raw,unit=1,file=$installed_vars" \
+    -boot c -drive "file=$RAW_IMAGE,format=raw,if=virtio,snapshot=on"
   echo 'installed raw image UEFI boot: PASS' >> "$RESULTS"
 else
-  echo 'installed raw image UEFI boot: SKIPPED (OVMF not installed)' >> "$RESULTS"
+  echo 'installed raw image UEFI boot: SKIPPED (OVMF code/variables not installed)' >> "$RESULTS"
 fi
 
 # Extract one direct-boot kernel/initramfs pair from each profile. Direct boot
