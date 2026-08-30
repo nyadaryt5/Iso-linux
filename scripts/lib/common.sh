@@ -39,6 +39,28 @@ die() {
   exit 1
 }
 
+report_command_error() {
+  local status=$?
+  local source_file=${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}
+  local source_line=${BASH_LINENO[0]:-1}
+  local failed_command=${BASH_COMMAND:-unknown}
+  # GitHub annotation escaping. The normal stderr line remains useful locally.
+  failed_command=${failed_command//'%'/'%25'}
+  failed_command=${failed_command//$'\r'/'%0D'}
+  failed_command=${failed_command//$'\n'/'%0A'}
+  printf 'Command failed (exit %s) at %s:%s: %s\n' \
+    "$status" "$source_file" "$source_line" "$failed_command" >&2
+  if [[ -n ${GITHUB_ACTIONS:-} ]]; then
+    printf '::error file=%s,line=%s::Command failed with exit %s: %s\n' \
+      "$source_file" "$source_line" "$status" "$failed_command"
+  fi
+  return "$status"
+}
+
+enable_error_report() {
+  trap report_command_error ERR
+}
+
 require_root() {
   [[ ${EUID:-$(id -u)} -eq 0 ]] || die 'this build step must run as root (use sudo -E)'
 }

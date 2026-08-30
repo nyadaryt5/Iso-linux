@@ -5,6 +5,7 @@ set -Eeuo pipefail
 PROJECT_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=scripts/lib/common.sh
 source "$PROJECT_ROOT/scripts/lib/common.sh"
+enable_error_report
 require_commands qemu-system-x86_64 xorriso sha256sum timeout grep
 [[ -s "$COMPACT_ISO" && -s "$WIFI_ISO" ]] || die 'both ISOs must exist before QEMU tests'
 [[ -s "$CHECKSUM_FILE" ]] || die 'SHA256SUMS is missing'

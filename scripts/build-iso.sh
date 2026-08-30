@@ -5,6 +5,7 @@ set -Eeuo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=scripts/lib/common.sh
 source "$SCRIPT_DIR/lib/common.sh"
+enable_error_report
 
 require_root
 require_commands grub-mkrescue xorriso cp sha256sum awk grep
