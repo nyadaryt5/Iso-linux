@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""Provider-neutral MicroAI client with an explicit privilege boundary."""
+
+from __future__ import annotations
+
+import getpass
+import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+SYSTEM_CONFIG = Path("/etc/micro-ubuntu/ai.conf")
+USER_CONFIG = Path.home() / ".config/micro-ubuntu/ai.conf"
+DEFAULTS = {
+    "AI_PROVIDER": "api",
+    "AI_API_URL": "https://api.openai.com/v1/chat/completions",
+    "AI_API_MODEL": "gpt-4o-mini",
+    "AI_LOCAL_URL": "http://127.0.0.1:11434/v1/chat/completions",
+    "AI_LOCAL_MODEL": "llama3.2:1b",
+    "AI_RUN_AS_ROOT": "0",
+}
+
+
+def read_assignments(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return values
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.replace("_", "").isalnum():
+            values[key] = value.strip().strip("'\"")
+    return values
+
+
+def configuration() -> dict[str, str]:
+    config = dict(DEFAULTS)
+    config.update(read_assignments(SYSTEM_CONFIG))
+    config.update(read_assignments(USER_CONFIG))
+    for key in tuple(config):
+        if key in os.environ:
+            config[key] = os.environ[key]
+    # Root execution is never enabled by a provider configuration file.
+    config["AI_RUN_AS_ROOT"] = "0"
+    return config
+
+
+def ask(prompt: str) -> int:
+    config = configuration()
+    provider = config["AI_PROVIDER"]
+    if provider == "local":
+        endpoint = config["AI_LOCAL_URL"]
+        model = config["AI_LOCAL_MODEL"]
+        token = None
+    elif provider == "api":
+        endpoint = config["AI_API_URL"]
+        model = config["AI_API_MODEL"]
+        token = os.environ.get("MICRO_AI_API_KEY") or getpass.getpass(
+            "Provider API key (kept in RAM, not saved): "
+        )
+        if not token:
+            print("No API key supplied.", file=sys.stderr)
+            return 2
+    else:
+        print(f"Unsupported AI provider: {provider}", file=sys.stderr)
+        return 2
+
+    payload = json.dumps(
+        {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are MicroAI on MicroUbuntu. Be concise and honest. "
+                        "Never claim a command ran unless its output is shown. "
+                        "Privileged work requires the owner's local power-mode confirmation."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+        }
+    ).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(endpoint, data=payload, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            result = json.load(response)
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+        print(f"AI request failed: {error}", file=sys.stderr)
+        return 1
+    try:
+        print(result["choices"][0]["message"]["content"])
+    except (KeyError, IndexError, TypeError):
+        print(json.dumps(result, indent=2))
+    return 0
+
+
+def run_command(arguments: list[str], as_root: bool) -> int:
+    if not arguments:
+        print("No command supplied.", file=sys.stderr)
+        return 2
+    rendered = shlex.join(arguments)
+    print(f"Proposed command: {rendered}")
+    confirmation = input("Type EXECUTE to run it: ")
+    if confirmation != "EXECUTE":
+        print("Command cancelled.")
+        return 1
+    env = os.environ.copy()
+    env["MICRO_AI_INVOKED"] = "1"
+    if as_root:
+        if subprocess.run(["micro-power", "--check"], check=False).returncode != 0:
+            print(
+                "Root execution is disabled. Run micro-power enable and type the required phrase.",
+                file=sys.stderr,
+            )
+            return 77
+        command = ["sudo", "--preserve-env=MICRO_AI_INVOKED", *arguments]
+    else:
+        command = arguments
+    return subprocess.run(command, env=env, check=False).returncode
+
+
+def main() -> int:
+    Path("/var/lib/micro-ubuntu/models").mkdir(parents=True, exist_ok=True)
+    if len(sys.argv) < 2:
+        prompt = input("micro-ai> ").strip()
+        return ask(prompt) if prompt else 0
+    if sys.argv[1] in {"configure", "config"}:
+        return subprocess.run(["micro-ai-config"], check=False).returncode
+    if sys.argv[1] == "--run":
+        return run_command(sys.argv[2:], as_root=False)
+    if sys.argv[1] == "--root-run":
+        return run_command(sys.argv[2:], as_root=True)
+    if sys.argv[1] in {"-h", "--help"}:
+        print("Usage: micro-ai [prompt] | configure | --run COMMAND | --root-run COMMAND")
+        return 0
+    return ask(" ".join(sys.argv[1:]))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

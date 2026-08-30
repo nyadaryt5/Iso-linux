@@ -1,0 +1,38 @@
+#!/bin/sh
+# Explicit local-owner gate for privileged AI actions.
+set -eu
+
+policy_home=${HOME:-/home/micro}
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+  policy_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+fi
+policy_dir="$policy_home/.config/micro-ubuntu"
+policy_file="$policy_dir/power-mode"
+
+case "${1:-}" in
+  enable)
+    echo 'Power mode permits MicroAI to request privileged commands.'
+    echo 'Review every proposed command. Never paste secrets into an AI prompt.'
+    printf 'Type exactly ENABLE POWER MODE: '
+    IFS= read -r answer
+    [ "$answer" = 'ENABLE POWER MODE' ] || { echo 'Power mode remains disabled.'; exit 1; }
+    mkdir -p "$policy_dir"
+    umask 077
+    printf 'enabled-by=%s\nenabled-at=%s\n' "$(id -un)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$policy_file"
+    echo 'Power mode enabled. Run micro-power disable to turn it off.'
+    ;;
+  disable)
+    rm -f "$policy_file"
+    echo 'Power mode disabled.'
+    ;;
+  status)
+    if [ -s "$policy_file" ]; then echo 'Power mode: enabled'; else echo 'Power mode: disabled'; fi
+    ;;
+  --check)
+    [ -s "$policy_file" ]
+    ;;
+  *)
+    echo 'Usage: micro-power enable | disable | status' >&2
+    exit 2
+    ;;
+esac

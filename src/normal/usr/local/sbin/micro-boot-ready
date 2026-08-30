@@ -1,0 +1,3 @@
+#!/bin/sh
+# Serial is diagnostic-only; normal interaction remains on tty0/tty1.
+printf 'MICROUBUNTU_INSTALLED_READY\n' > /dev/ttyS0 2>/dev/null || true
