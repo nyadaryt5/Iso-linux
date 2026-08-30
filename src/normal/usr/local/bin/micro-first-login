@@ -1,0 +1,72 @@
+#!/bin/sh
+# Initial terminal-first choice. Keep the three top-level choices stable: they
+# are part of the installer contract and are intentionally not padded with an
+# extra "exit" option.
+set -eu
+
+state_dir="$HOME/.local/state/micro-ubuntu"
+marker="$state_dir/first-login-complete"
+mkdir -p "$state_dir"
+
+while [ ! -e "$marker" ]; do
+  clear 2>/dev/null || true
+  cat <<'EOF'
+=============================================
+          Welcome to MicroUbuntu
+=============================================
+1. Terminal-based system
+2. Build graphical interface
+3. Decide later
+EOF
+  printf 'Choose 1, 2, or 3: '
+  IFS= read -r choice || choice=3
+
+  case "$choice" in
+    1)
+      selected=terminal
+      ;;
+    2)
+      echo
+      echo '1. Light interface (Xorg, Openbox, Xterm, LightDM)'
+      echo '2. Full interface (Ubuntu Desktop Minimal)'
+      printf 'Choose 1 or 2: '
+      IFS= read -r gui_choice || gui_choice=
+      case "$gui_choice" in
+        1) sudo /usr/local/bin/gui-builder --light || { printf 'GUI build failed; returning to the chooser.\n'; sleep 2; continue; } ;;
+        2) sudo /usr/local/bin/gui-builder --full || { printf 'GUI build failed; returning to the chooser.\n'; sleep 2; continue; } ;;
+        *) printf 'Invalid graphical-interface choice.\n'; sleep 2; continue ;;
+      esac
+      selected=graphical
+      ;;
+    3)
+      selected=later
+      ;;
+    *)
+      printf 'Invalid choice. Enter 1, 2, or 3.\n'
+      sleep 2
+      continue
+      ;;
+  esac
+
+  # The image starts with a locked account and a one-time local autologin.
+  # This root helper invokes passwd on the controlling terminal, then removes
+  # both autologin and its narrowly scoped passwordless sudo exception.
+  if [ -e /var/lib/micro-ubuntu/needs-password ]; then
+    echo
+    echo 'Set the password for your persistent micro account.'
+    sudo /usr/local/sbin/micro-firstboot-finalize || {
+      echo 'Password setup did not complete; the first-login chooser will remain enabled.'
+      sleep 3
+      continue
+    }
+  fi
+
+  printf '%s\n' "$selected" > "$state_dir/interface-choice"
+  touch "$marker"
+  echo
+  case "$selected" in
+    graphical) echo 'The graphical target is ready. Reboot when convenient.' ;;
+    *) echo 'Terminal mode is ready. Run micro-control-center at any time.' ;;
+  esac
+  sleep 2
+ done

@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+pause() { printf '\nPress Enter to continue... '; IFS= read -r _ || true; }
+while :; do
+  clear 2>/dev/null || true
+  cat <<'EOF'
+=============================================
+          MicroUbuntu Control Center
+=============================================
+1. Open a terminal shell
+2. Configure networking and Wi-Fi
+3. Configure or ask MicroAI
+4. Open MicroHermes
+5. Run Browser Agent
+6. Build a graphical interface
+7. AI power-mode policy
+8. Show system information
+9. Exit
+EOF
+  printf 'Choose: '
+  IFS= read -r choice || exit 0
+  case "$choice" in
+    1) "${SHELL:-/bin/bash}" ;;
+    2)
+      echo 'NetworkManager devices:'
+      nmcli device status
+      echo
+      echo 'Use: nmcli device wifi list'
+      echo 'Then: nmcli device wifi connect "SSID" --ask'
+      pause
+      ;;
+    3)
+      echo '1. Ask MicroAI'
+      echo '2. Provider and local-model settings'
+      printf 'Choose: '; IFS= read -r sub
+      case "$sub" in 1) micro-ai ;; 2) micro-ai-config ;; esac
+      pause
+      ;;
+    4) micro-hermes ;;
+    5) printf 'URL: '; IFS= read -r url; [ -z "$url" ] || browser-agent "$url"; pause ;;
+    6)
+      echo 'Run either gui-builder --light or gui-builder --full.'
+      echo 'A graphical target is selected only after installation succeeds.'
+      pause
+      ;;
+    7) micro-power status; echo 'Commands: micro-power enable | disable'; pause ;;
+    8) uname -a; echo; df -h /; echo; ip -brief address; pause ;;
+    9) exit 0 ;;
+    *) echo 'Invalid choice.'; sleep 1 ;;
+  esac
+done

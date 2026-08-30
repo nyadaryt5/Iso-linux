@@ -1,0 +1,11 @@
+[Unit]
+Description=Emit the MicroUbuntu installed-system test marker
+After=multi-user.target
+ConditionPathExists=/dev/ttyS0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/micro-boot-ready
+
+[Install]
+WantedBy=multi-user.target

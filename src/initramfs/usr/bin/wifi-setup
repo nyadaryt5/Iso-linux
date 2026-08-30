@@ -1,0 +1,163 @@
+#!/bin/sh
+# Interactive Wi-Fi setup using the open kernel stack, iw, rfkill,
+# wpa_supplicant, and a NetworkManager-compatible saved connection.
+set +e
+
+if [ "${1:-}" = --test-failure ]; then
+  echo 'Wi-Fi connection failed.'
+  echo '1) Retry Wi-Fi setup'
+  echo '0) Return to the installer menu'
+  echo 'MICRO_TEST_WIFI_RETRY_OK'
+  exit 1
+fi
+
+find_interface() {
+  for path in /sys/class/net/*; do
+    [ -d "$path/wireless" ] || continue
+    printf '%s\n' "${path##*/}"
+    return 0
+  done
+  return 1
+}
+
+write_nm_connection() {
+  interface=$1
+  ssid=$2
+  psk=$3
+  digest=$(printf '%s' "$ssid" | sha256sum | cut -c1-32)
+  uuid=$(printf '%s-%s-%s-%s-%s' \
+    "$(printf '%s' "$digest" | cut -c1-8)" \
+    "$(printf '%s' "$digest" | cut -c9-12)" \
+    "$(printf '%s' "$digest" | cut -c13-16)" \
+    "$(printf '%s' "$digest" | cut -c17-20)" \
+    "$(printf '%s' "$digest" | cut -c21-32)")
+  umask 077
+  {
+    echo '[connection]'
+    echo "id=MicroUbuntu installer - $ssid"
+    echo "uuid=$uuid"
+    echo 'type=wifi'
+    echo "interface-name=$interface"
+    echo
+    echo '[wifi]'
+    echo 'mode=infrastructure'
+    echo "ssid=$ssid"
+    echo
+    echo '[wifi-security]'
+    if [ -n "$psk" ]; then
+      echo 'key-mgmt=wpa-psk'
+      echo "psk=$psk"
+    else
+      echo 'key-mgmt=none'
+    fi
+    echo
+    echo '[ipv4]'
+    echo 'method=auto'
+    echo
+    echo '[ipv6]'
+    echo 'method=auto'
+  } > /run/micro-wifi.nmconnection
+}
+
+connect_once() {
+  rfkill unblock wifi 2>/dev/null || rfkill unblock all 2>/dev/null || true
+  /usr/bin/load-hardware wifi >/dev/null 2>&1 || true
+  interface=$(find_interface) || {
+    echo 'No Wi-Fi interface was detected.'
+    echo 'The adapter may require firmware that is not redistributable or a newer kernel.'
+    return 1
+  }
+  ip link set "$interface" up 2>/dev/null || {
+    echo "Could not bring $interface up. Check the hardware Wi-Fi switch and rfkill."
+    return 1
+  }
+
+  echo "Scanning on $interface..."
+  if ! iw dev "$interface" scan 2>/tmp/iw-scan.err \
+      | sed -n 's/^[[:space:]]*SSID: //p' \
+      | awk 'length($0) && !seen[$0]++' > /tmp/wifi-networks; then
+    cat /tmp/iw-scan.err 2>/dev/null
+    echo 'Network scan failed.'
+    return 1
+  fi
+  [ -s /tmp/wifi-networks ] || { echo 'No visible Wi-Fi networks were found.'; return 1; }
+  echo 'Visible networks:'
+  awk '{ printf "%d) %s\n", NR, $0 }' /tmp/wifi-networks
+  printf 'Select a network number: '
+  IFS= read -r selection || return 1
+  case "$selection" in ''|*[!0-9]*) echo 'Invalid network number.'; return 1 ;; esac
+  ssid=$(sed -n "${selection}p" /tmp/wifi-networks)
+  [ -n "$ssid" ] || { echo 'Invalid network number.'; return 1; }
+
+  printf 'Wi-Fi password (leave empty for an open network): '
+  saved_stty=$(stty -g 2>/dev/null)
+  stty -echo 2>/dev/null || true
+  IFS= read -r password
+  [ -z "$saved_stty" ] || stty "$saved_stty" 2>/dev/null
+  echo
+
+  umask 077
+  if [ -n "$password" ]; then
+    if ! wpa_passphrase "$ssid" "$password" \
+        | sed '/^[[:space:]]*#psk=/d' > /run/wpa_supplicant.conf; then
+      unset password
+      echo 'The password must be between 8 and 63 characters for WPA-PSK.'
+      return 1
+    fi
+    psk=$(sed -n 's/^[[:space:]]*psk=//p' /run/wpa_supplicant.conf | tail -n 1)
+  else
+    escaped_ssid=$(printf '%s' "$ssid" | sed 's/[\\"]/\\&/g')
+    cat > /run/wpa_supplicant.conf <<EOF
+ctrl_interface=/run/wpa_supplicant
+network={
+    ssid="$escaped_ssid"
+    key_mgmt=NONE
+}
+EOF
+    psk=
+  fi
+  unset password
+
+  wpa_cli -i "$interface" terminate >/dev/null 2>&1 || true
+  rm -rf /run/wpa_supplicant
+  mkdir -p /run/wpa_supplicant
+  if ! wpa_supplicant -B -i "$interface" -c /run/wpa_supplicant.conf \
+      -C /run/wpa_supplicant; then
+    echo 'wpa_supplicant could not start.'
+    return 1
+  fi
+
+  connected=0
+  attempt=0
+  while [ "$attempt" -lt 30 ]; do
+    if wpa_cli -i "$interface" status 2>/dev/null | grep -q '^wpa_state=COMPLETED$'; then
+      connected=1
+      break
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  [ "$connected" -eq 1 ] || { echo 'Association or authentication timed out.'; return 1; }
+  if ! udhcpc -q -n -t 5 -T 3 -i "$interface" -s /etc/udhcpc.script; then
+    echo 'Connected to Wi-Fi, but DHCP failed.'
+    return 1
+  fi
+  write_nm_connection "$interface" "$ssid" "$psk"
+  echo "Connected to $ssid. Its NetworkManager profile will be copied to the installed system."
+  return 0
+}
+
+while :; do
+  connect_once && exit 0
+  echo
+  echo 'Wi-Fi connection failed.'
+  echo '1) Retry Wi-Fi setup'
+  echo '0) Return to the installer menu'
+  printf 'Choose: '
+  IFS= read -r retry || exit 1
+  case "$retry" in
+    1) ;;
+    0) exit 1 ;;
+    *) echo 'Invalid choice.' ;;
+  esac
+done

@@ -1,0 +1,51 @@
+#!/bin/sh
+set +e
+
+network_is_up() {
+  ip route 2>/dev/null | grep -q '^default '
+}
+
+wired_dhcp() {
+  found=0
+  for path in /sys/class/net/*; do
+    [ -e "$path" ] || continue
+    interface=${path##*/}
+    [ "$interface" = lo ] && continue
+    [ -d "$path/wireless" ] && continue
+    found=1
+    printf 'Requesting DHCP on %s...\n' "$interface"
+    ip link set "$interface" up 2>/dev/null
+    if udhcpc -q -n -t 5 -T 3 -i "$interface" -s /etc/udhcpc.script; then
+      printf 'Network connected on %s.\n' "$interface"
+      return 0
+    fi
+  done
+  [ "$found" -eq 1 ] || echo 'No wired network interface was detected.'
+  echo 'Wired DHCP failed.'
+  return 1
+}
+
+case "${1:-menu}" in
+  wired) wired_dhcp ;;
+  status) network_is_up ;;
+  menu)
+    profile=$(cat /run/micro-profile 2>/dev/null || echo compact)
+    while :; do
+      echo 'Network setup'
+      echo '1) Try wired DHCP'
+      if [ "$profile" = wifi ]; then echo '2) Scan and connect to Wi-Fi'; fi
+      echo '3) Show addresses and routes'
+      echo '0) Back'
+      printf 'Choose: '
+      IFS= read -r choice || return 1
+      case "$choice" in
+        1) wired_dhcp; return $? ;;
+        2) [ "$profile" = wifi ] && /usr/bin/wifi-setup && return 0 ;;
+        3) ip addr; ip route ;;
+        0) return 1 ;;
+        *) echo 'Invalid choice.' ;;
+      esac
+    done
+    ;;
+  *) echo 'Usage: network-setup [menu|wired|status]' >&2; exit 2 ;;
+esac

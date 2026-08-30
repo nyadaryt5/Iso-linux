@@ -1,0 +1,49 @@
+#!/bin/sh
+# Persistent, terminal-first Hermes workspace layered over MicroAI.
+set -eu
+
+home=/var/lib/micro-ubuntu/hermes
+memories="$home/MEMORY.md"
+sessions="$home/sessions"
+mkdir -p "$sessions"
+[ -e "$memories" ] || printf '# MicroHermes persistent memory\n' > "$memories"
+
+pause() { printf '\nPress Enter to continue... '; IFS= read -r _ || true; }
+while :; do
+  clear 2>/dev/null || true
+  cat <<EOF
+MicroHermes
+Persistent workspace: $home
+
+1. Ask MicroHermes
+2. Read persistent memory
+3. Add a memory note
+4. List saved sessions
+5. Return
+EOF
+  printf 'Choose: '
+  IFS= read -r choice || exit 0
+  case "$choice" in
+    1)
+      printf 'Request: '
+      IFS= read -r request
+      [ -n "$request" ] || continue
+      session="$sessions/$(date -u +%Y%m%d-%H%M%S).txt"
+      context=$(tail -n 80 "$memories")
+      {
+        printf 'REQUEST: %s\n\n' "$request"
+        micro-ai "You are MicroHermes. Use this durable memory when relevant:\n$context\n\nUser request: $request"
+      } | tee "$session"
+      pause
+      ;;
+    2) clear; cat "$memories"; pause ;;
+    3)
+      printf 'Memory note: '
+      IFS= read -r note
+      [ -z "$note" ] || printf -- '- %s — %s\n' "$(date -u +%F)" "$note" >> "$memories"
+      ;;
+    4) find "$sessions" -maxdepth 1 -type f -printf '%f\n' | sort; pause ;;
+    5) exit 0 ;;
+    *) echo 'Invalid choice.'; sleep 1 ;;
+  esac
+done
