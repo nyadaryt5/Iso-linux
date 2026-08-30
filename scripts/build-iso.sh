@@ -83,6 +83,12 @@ if [[ $PROFILE == compact ]]; then
   max_bytes=$((COMPACT_ISO_MAX_MIB * 1024 * 1024))
   (( iso_bytes <= max_bytes )) || die \
     "compact ISO is $(human_size "$iso_bytes"), above the ${COMPACT_ISO_MAX_MIB} MiB safety ceiling"
+else
+  # GitHub release assets are limited to 2 GiB per file; the Wi-Fi ISO bundles
+  # the compressed raw image, so it is the most likely deliverable to hit it.
+  max_bytes=$((WIFI_ISO_MAX_MIB * 1024 * 1024))
+  (( iso_bytes <= max_bytes )) || die \
+    "Wi-Fi ISO is $(human_size "$iso_bytes"), above the ${WIFI_ISO_MAX_MIB} MiB ceiling needed to stay under GitHub's 2 GiB per-asset release limit"
 fi
 sha256sum "$output" > "$OUT_DIR/$(basename "$output").sha256"
 write_checksums

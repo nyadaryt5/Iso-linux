@@ -234,6 +234,10 @@ python3 "$SCRIPT_DIR/copy_elf.py" --root "$ROOT_MOUNT" --dest "$SYSTEM_SOURCE_DI
 # Keep apt itself functional while removing only regenerable build residue.
 chroot "$ROOT_MOUNT" apt-get clean
 rm -rf "$ROOT_MOUNT/var/lib/apt/lists/"* "$ROOT_MOUNT/tmp/"* "$ROOT_MOUNT/var/tmp/"*
+# Documentation and manual pages are regenerable and add hundreds of MiB to
+# the compressed image; keep the appliance lean without touching package state.
+rm -rf "$ROOT_MOUNT/usr/share/doc" "$ROOT_MOUNT/usr/share/man" \
+  "$ROOT_MOUNT/usr/share/info" "$ROOT_MOUNT/var/cache/apt/"*
 rm -f "$ROOT_MOUNT/usr/sbin/policy-rc.d"
 rm -f "$ROOT_MOUNT/etc/resolv.conf"
 ln -s ../run/NetworkManager/resolv.conf "$ROOT_MOUNT/etc/resolv.conf"
@@ -247,11 +251,11 @@ safe_umount "$ROOT_MOUNT"
 losetup -d "$LOOP_DEVICE"
 LOOP_DEVICE=
 
-log 'Compressing the sparse raw image with gzip'
+log 'Compressing the sparse raw image with gzip (maximum ratio)'
 if command -v pigz >/dev/null 2>&1; then
-  pigz -1 -n -c "$RAW_IMAGE" > "$COMPRESSED_IMAGE"
+  pigz -9 -n -c "$RAW_IMAGE" > "$COMPRESSED_IMAGE"
 else
-  gzip -1 -n -c "$RAW_IMAGE" > "$COMPRESSED_IMAGE"
+  gzip -9 -n -c "$RAW_IMAGE" > "$COMPRESSED_IMAGE"
 fi
 gzip -t "$COMPRESSED_IMAGE"
 

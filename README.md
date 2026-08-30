@@ -18,6 +18,8 @@ Both ISOs support legacy BIOS and amd64 UEFI and contain exactly these two GRUB 
 
 The images currently use Ubuntu 22.04 LTS (`jammy`) and its 5.15 GA kernel, chosen for broad compatibility with older laptops. The removable-media UEFI loader is not Secure Boot signed; disable Secure Boot before booting it.
 
+GitHub publishes release assets with a hard 2 GiB per-file limit, so the Wi-Fi ISO (which bundles the compressed raw image) is capped at `WIFI_ISO_MAX_MIB` (default 2040 MiB). The build fails with a clear message if the cap is exceeded instead of failing silently during release upload.
+
 ## What each boot option does
 
 ### Temporary session

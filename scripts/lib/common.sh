@@ -23,6 +23,10 @@ fi
 : "${COMPACT_ISO_NAME:=micro-ubuntu-bootstrap.iso}"
 : "${WIFI_ISO_NAME:=micro-ubuntu-wifi-installer.iso}"
 : "${COMPACT_ISO_MAX_MIB:=32}"
+# GitHub publishes release assets with a hard 2 GiB per-file limit. The Wi-Fi
+# ISO bundles the compressed raw image, so it is capped below that limit with
+# a small safety margin; the build fails with a clear message if exceeded.
+: "${WIFI_ISO_MAX_MIB:=2040}"
 : "${SOURCE_DATE_EPOCH:=1704067200}"
 
 RAW_IMAGE="$OUT_DIR/$IMAGE_NAME"

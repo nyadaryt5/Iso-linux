@@ -137,10 +137,13 @@ if [[ $PROFILE == wifi ]]; then
 
   # Include redistributable Ubuntu linux-firmware families for the requested
   # open drivers. copy_modules.py already copied exact declared firmware; these
-  # globs cover DMI/board-specific and wildcard requests too.
+  # globs cover DMI/board-specific and wildcard requests too. The broad 'intel'
+  # and 'mrvl' trees (SOF/AVS/i915/IPU3 and old Marvell) are intentionally
+  # excluded: they are not needed by the target laptop Wi-Fi families and
+  # would otherwise push the Wi-Fi ISO over GitHub's 2 GiB release limit.
   firmware_patterns=(
-    'iwlwifi-*.ucode' 'intel' 'ath9k_htc' 'ath10k' 'ath11k' 'brcm' 'cypress'
-    'rtw88' 'rtw89' 'rtlwifi' 'rtl_nic' 'rtl_bt' 'mediatek' 'mrvl'
+    'iwlwifi-*.ucode' 'ath9k_htc' 'ath10k' 'ath11k' 'brcm' 'cypress'
+    'rtw88' 'rtw89' 'rtlwifi' 'rtl_nic' 'rtl_bt' 'mediatek'
     'regulatory.db' 'regulatory.db.p7s'
   )
   for pattern in "${firmware_patterns[@]}"; do
