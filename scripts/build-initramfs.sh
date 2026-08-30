@@ -162,6 +162,7 @@ mknod -m 0600 "$STAGING/dev/console" c 5 1
 mknod -m 0666 "$STAGING/dev/null" c 1 3
 mknod -m 0620 "$STAGING/dev/tty0" c 4 0
 mknod -m 0620 "$STAGING/dev/tty1" c 4 1
+mknod -m 0620 "$STAGING/dev/ttyS0" c 4 64
 
 # Deterministic archive metadata keeps checksums stable for identical package inputs.
 find "$STAGING" -xdev -print0 | xargs -0 touch -h -d "@$SOURCE_DATE_EPOCH"

@@ -55,7 +55,7 @@ run_until_marker() {
   shift 2
   : > "$log_file"
   qemu-system-x86_64 \
-    -machine pc,accel=tcg -cpu max -m 768 -no-reboot -no-shutdown \
+    -machine pc,accel=tcg -cpu max -m 2048 -no-reboot -no-shutdown \
     -display none -serial stdio -monitor none "$@" >"$log_file" 2>&1 &
   local pid=$!
   PIDS+=("$pid")
@@ -72,7 +72,8 @@ run_until_marker() {
   assert_clean_log "$log_file"
   if [[ $found -ne 1 ]]; then
     tail -n 120 "$log_file" >&2
-    die "QEMU did not reach marker: $marker"
+    diagnostic=$(tail -c 2400 "$log_file" | tr '\r\n' ' ')
+    die "QEMU did not reach $marker in $(basename "$log_file"). Log tail: $diagnostic"
   fi
 }
 
