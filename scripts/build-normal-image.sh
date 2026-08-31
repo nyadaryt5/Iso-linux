@@ -172,6 +172,8 @@ install -d -m 2775 -o "$micro_uid" -g "$micro_gid" \
   "$ROOT_MOUNT/var/lib/micro-ubuntu/models" \
   "$ROOT_MOUNT/var/lib/micro-ubuntu/browser" \
   "$ROOT_MOUNT/var/lib/micro-ubuntu/hermes" \
+  "$ROOT_MOUNT/var/lib/micro-ubuntu/brain" \
+  "$ROOT_MOUNT/var/lib/micro-ubuntu/ai" \
   "$ROOT_MOUNT/var/lib/micro-ubuntu/settings"
 touch "$ROOT_MOUNT/var/lib/micro-ubuntu/needs-password"
 chown "$micro_uid:$micro_gid" "$ROOT_MOUNT/var/lib/micro-ubuntu/needs-password"

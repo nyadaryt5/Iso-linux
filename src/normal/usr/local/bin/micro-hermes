@@ -30,9 +30,10 @@ EOF
       [ -n "$request" ] || continue
       session="$sessions/$(date -u +%Y%m%d-%H%M%S).txt"
       context=$(tail -n 80 "$memories")
+      brain_context=$(/usr/local/bin/micro-brain context 2>/dev/null || true)
       {
         printf 'REQUEST: %s\n\n' "$request"
-        micro-ai "You are MicroHermes. Use this durable memory when relevant:\n$context\n\nUser request: $request"
+        micro-ai "You are MicroHermes. Use this durable memory when relevant:\n$context\n\nMachine brain (shared identity and memory):\n$brain_context\n\nUser request: $request"
       } | tee "$session"
       pause
       ;;

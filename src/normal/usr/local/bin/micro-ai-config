@@ -1,14 +1,26 @@
 #!/bin/sh
-# Persist provider/model choices without persisting credentials.
+# Persist provider/model choices and manage credential pools.
+# Credential VALUES are never written to ai.conf: API keys live in
+# ~/.config/micro-ubuntu/api-keys and Gemini cookie accounts live in
+# ~/.config/micro-ubuntu/gemini-cookies/ (both mode 0600).
 set -eu
 
 config_dir="$HOME/.config/micro-ubuntu"
 config="$config_dir/ai.conf"
-provider=api
+api_keys_file="$config_dir/api-keys"
+cookie_dir="$config_dir/gemini-cookies"
+
+provider=auto
+routes=api,gemini,local
+brain=1
 api_url=https://api.openai.com/v1/chat/completions
-api_model=gpt-4o-mini
+api_model=auto
+model_preference=
 local_url=http://127.0.0.1:11434/v1/chat/completions
 local_model=llama3.2:1b
+gemini_model=gemini-auto
+api_keys_file_setting=
+cookie_dir_setting=
 
 read_value() {
   key=$1 file=$2
@@ -17,40 +29,231 @@ read_value() {
 for source_file in /etc/micro-ubuntu/ai.conf "$config"; do
   [ -r "$source_file" ] || continue
   value=$(read_value AI_PROVIDER "$source_file"); [ -z "$value" ] || provider=$value
+  value=$(read_value AI_ROUTES "$source_file"); [ -z "$value" ] || routes=$value
+  value=$(read_value AI_BRAIN "$source_file"); [ -z "$value" ] || brain=$value
   value=$(read_value AI_API_URL "$source_file"); [ -z "$value" ] || api_url=$value
   value=$(read_value AI_API_MODEL "$source_file"); [ -z "$value" ] || api_model=$value
+  value=$(read_value AI_MODEL_PREFERENCE "$source_file"); [ -z "$value" ] || model_preference=$value
   value=$(read_value AI_LOCAL_URL "$source_file"); [ -z "$value" ] || local_url=$value
   value=$(read_value AI_LOCAL_MODEL "$source_file"); [ -z "$value" ] || local_model=$value
+  value=$(read_value AI_GEMINI_MODEL "$source_file"); [ -z "$value" ] || gemini_model=$value
+  value=$(read_value AI_API_KEYS_FILE "$source_file"); [ -z "$value" ] || api_keys_file_setting=$value
+  value=$(read_value AI_GEMINI_COOKIE_DIR "$source_file"); [ -z "$value" ] || cookie_dir_setting=$value
 done
+[ -z "$api_keys_file_setting" ] || api_keys_file=$api_keys_file_setting
+[ -z "$cookie_dir_setting" ] || cookie_dir=$cookie_dir_setting
 
-printf 'Provider (api/local) [%s]: ' "$provider"
-IFS= read -r value; [ -z "$value" ] || provider=$value
-case "$provider" in api|local) ;; *) echo 'Provider must be api or local.' >&2; exit 2 ;; esac
-printf 'API endpoint [%s]: ' "$api_url"
-IFS= read -r value; [ -z "$value" ] || api_url=$value
-printf 'API model [%s]: ' "$api_model"
-IFS= read -r value; [ -z "$value" ] || api_model=$value
-printf 'Local OpenAI-compatible endpoint [%s]: ' "$local_url"
-IFS= read -r value; [ -z "$value" ] || local_url=$value
-printf 'Local model [%s]: ' "$local_model"
-IFS= read -r value; [ -z "$value" ] || local_model=$value
-if printf '%s' "$api_url $local_url" | grep -q '[^A-Za-z0-9/:._?=%+&-]'; then
-  echo 'Endpoint contains unsupported characters.' >&2
-  exit 2
+count_keys() {
+  if [ -f "$api_keys_file" ]; then grep -c '^[^#[:space:]]' "$api_keys_file" 2>/dev/null || true
+  else printf '0'; fi
+}
+
+list_accounts() {
+  if [ -d "$cookie_dir" ]; then
+    find "$cookie_dir" -maxdepth 1 -type f \( -name '*.json' -o -name '*.txt' \) | sort
+  fi
+}
+
+add_api_keys() {
+  printf 'Paste API keys, one per line. Press Enter on an empty line to stop.\n'
+  mkdir -p "$config_dir"
+  while IFS= read -r line; do
+    [ -z "$line" ] && break
+    line=$(printf '%s' "$line" | tr -d '[:space:]')
+    [ -z "$line" ] && continue
+    short=$(printf '%s' "$line" | cut -c1-8)
+    if [ -f "$api_keys_file" ] && grep -Fxq "$line" "$api_keys_file"; then
+      echo "Already present: $short (skipped)"
+      continue
+    fi
+    printf '%s\n' "$line" >> "$api_keys_file"
+    echo "Added key $short"
+  done
+  if [ -f "$api_keys_file" ]; then
+    chmod 0600 "$api_keys_file"
+  fi
+}
+
+manage_api_keys() {
+  current=$(count_keys)
+  echo "API keys currently configured: $current ($api_keys_file)"
+  printf 'Manage keys? [a]dd / [c]lear / [k]eep (default keep): '
+  IFS= read -r action
+  case "$action" in
+    a|A|add)
+      add_api_keys
+      ;;
+    c|C|clear)
+      rm -f "$api_keys_file"
+      echo 'API key file cleared.'
+      ;;
+    *)
+      echo 'Keeping current API keys.'
+      ;;
+  esac
+}
+
+add_cookie_account() {
+  printf 'Paste the cookie export (JSON or Name=Value; ...), then press Enter on an empty line.\n'
+  value=''
+  while IFS= read -r line; do
+    [ -z "$line" ] && break
+    if [ -z "$value" ]; then value=$line; else value="${value}
+${line}"; fi
+  done
+  if [ -z "$value" ]; then
+    echo 'No cookie export was pasted; nothing was added.' >&2
+    return 1
+  fi
+  stamp=$(date -u +%Y%m%d-%H%M%S)
+  case "$value" in
+    '['*|'{'*)
+      if ! printf '%s\n' "$value" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+        echo 'The pasted value is not valid JSON.' >&2
+        return 1
+      fi
+      ;;
+    *'='*) ;;
+    *)
+      if [ -f "$value" ]; then
+        echo "Adding cookies from existing file $value"
+        cp "$value" "$cookie_dir/account-$stamp.json"
+        chmod 0600 "$cookie_dir/account-$stamp.json"
+        echo "Saved to $cookie_dir/"
+        return 0
+      fi
+      echo 'The pasted value is not a cookie export or an existing file.' >&2
+      return 1
+      ;;
+  esac
+  mkdir -p "$cookie_dir"
+  umask 077
+  file="$cookie_dir/account-$stamp.json"
+  printf '%s\n' "$value" > "$file"
+  chmod 0600 "$file"
+  echo "Cookie account saved to $file (mode 0600)."
+}
+
+manage_cookie_accounts() {
+  echo 'Gemini cookie accounts:'
+  total=$(list_accounts | wc -l | tr -d ' ')
+  if [ "$total" -gt 0 ]; then
+    n=0
+    list_accounts | while IFS= read -r file; do
+      [ -n "$file" ] || continue
+      n=$((n + 1))
+      printf '  %d) %s\n' "$n" "$(basename "$file")"
+    done
+  else
+    echo '  (none)'
+  fi
+  printf 'Manage accounts? [a]dd / [r]emove / [k]eep (default keep): '
+  IFS= read -r action
+  case "$action" in
+    a|A|add)
+      add_cookie_account
+      ;;
+    r|R|remove)
+      printf 'Number to remove: '
+      IFS= read -r number
+      file=$(list_accounts | sed -n "${number}p")
+      if [ -n "$file" ]; then
+        rm -f "$file"
+        echo "Removed $(basename "$file")."
+      else
+        echo 'No such account.' >&2
+      fi
+      ;;
+    *)
+      echo 'Keeping current cookie accounts.'
+      ;;
+  esac
+}
+
+# ---- provider selection ---------------------------------------------------
+
+if [ "$provider" = gemini ]; then
+  cat <<'EOF'
+Gemini uses your signed-in Google sessions; cookies are as sensitive as
+passwords. They are stored only in the mode-0600 account files, never in
+ai.conf, and are never logged.
+EOF
 fi
-if printf '%s' "$api_model $local_model" | grep -q '[^A-Za-z0-9/_.:+-]'; then
-  echo 'Model name contains unsupported characters.' >&2
-  exit 2
+printf 'Provider (api/local/gemini/auto) [%s]: ' "$provider"
+IFS= read -r value; [ -z "$value" ] || provider=$value
+case "$provider" in
+  api|local|gemini|auto) ;;
+  *) echo 'Provider must be api, local, gemini, or auto.' >&2; exit 2 ;;
+esac
+
+if [ "$provider" = auto ]; then
+  printf 'Routes (order to try, comma separated) [%s]: ' "$routes"
+  IFS= read -r value; [ -z "$value" ] || routes=$value
+  printf 'Persistent brain memory (y/N) [%s]: ' "$brain"
+  IFS= read -r value; [ -z "$value" ] || brain=$value
+  case "$brain" in y|Y|yes|YES|1) brain=1 ;; *) brain=0 ;; esac
+fi
+
+if [ "$provider" = api ] || [ "$provider" = auto ]; then
+  printf 'API endpoint [%s] (type "bynara" for router.bynara.id): ' "$api_url"
+  IFS= read -r value; [ -z "$value" ] || api_url=$value
+  case "$api_url" in
+    bynara|Bynara|BYNARA) api_url=https://router.bynara.id/v1/chat/completions ;;
+  esac
+  printf 'API model [%s] (auto = pick from the endpoint model list): ' "$api_model"
+  IFS= read -r value; [ -z "$value" ] || api_model=$value
+  printf 'Model preference (comma separated, e.g. claude,gpt-4o-mini) [%s]: ' "$model_preference"
+  IFS= read -r value; [ -z "$value" ] || model_preference=$value
+  manage_api_keys
+fi
+if [ "$provider" = local ] || [ "$provider" = auto ]; then
+  printf 'Local OpenAI-compatible endpoint [%s]: ' "$local_url"
+  IFS= read -r value; [ -z "$value" ] || local_url=$value
+  printf 'Local model [%s]: ' "$local_model"
+  IFS= read -r value; [ -z "$value" ] || local_model=$value
+fi
+if [ "$provider" = gemini ] || [ "$provider" = auto ]; then
+  printf 'Gemini web-model name [%s] (gemini-auto means web default): ' "$gemini_model"
+  IFS= read -r value; [ -z "$value" ] || gemini_model=$value
+  manage_cookie_accounts
+fi
+
+for endpoint in "$api_url" "$local_url"; do
+  if printf '%s' "$endpoint" | grep -q '[^A-Za-z0-9/:._?=%+&-]'; then
+    echo 'Endpoint contains unsupported characters.' >&2
+    exit 2
+  fi
+done
+for model in "$api_model" "$local_model" "$gemini_model"; do
+  if printf '%s' "$model" | grep -q '[^A-Za-z0-9/_.:+-]'; then
+    echo 'Model name contains unsupported characters.' >&2
+    exit 2
+  fi
+done
+if [ -n "$model_preference" ]; then
+  compact=$(printf '%s' "$model_preference" | tr -d ' ,')
+  if printf '%s' "$compact" | grep -q '[^A-Za-z0-9/_.:+-]'; then
+    echo 'Model preference contains unsupported characters.' >&2
+    exit 2
+  fi
 fi
 
 mkdir -p "$config_dir"
 umask 077
 cat > "$config" <<EOF
 AI_PROVIDER=$provider
+AI_ROUTES=$routes
+AI_BRAIN=$brain
 AI_API_URL=$api_url
 AI_API_MODEL=$api_model
+AI_MODEL_PREFERENCE=$model_preference
 AI_LOCAL_URL=$local_url
 AI_LOCAL_MODEL=$local_model
+AI_GEMINI_MODEL=$gemini_model
+AI_API_KEYS_FILE=$api_keys_file
+AI_GEMINI_COOKIE_DIR=$cookie_dir
 AI_RUN_AS_ROOT=0
 EOF
-printf 'Configuration saved to %s. API keys are never written to disk.\n' "$config"
+printf 'Configuration saved to %s. Credential values are never written to this file.\n' "$config"
+printf 'API keys: %s configured; Gemini cookie accounts: %s.\n' \
+  "$(count_keys)" "$(list_accounts | wc -l | tr -d ' ')"

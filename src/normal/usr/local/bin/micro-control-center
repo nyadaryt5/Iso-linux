@@ -10,13 +10,14 @@ while :; do
 =============================================
 1. Open a terminal shell
 2. Configure networking and Wi-Fi
-3. Configure or ask MicroAI
-4. Open MicroHermes
-5. Run Browser Agent
-6. Build a graphical interface
-7. AI power-mode policy
-8. Show system information
-9. Exit
+3. Configure or ask MicroAI (auto routing)
+4. Open MicroBrain (persistent memory)
+5. Open MicroHermes
+6. Run Browser Agent
+7. Build a graphical interface
+8. AI power-mode policy
+9. Show system information
+10. Exit
 EOF
   printf 'Choose: '
   IFS= read -r choice || exit 0
@@ -32,21 +33,41 @@ EOF
       ;;
     3)
       echo '1. Ask MicroAI'
-      echo '2. Provider and local-model settings'
+      echo '2. AI setup: providers, multiple keys/cookies, routes, brain'
       printf 'Choose: '; IFS= read -r sub
       case "$sub" in 1) micro-ai ;; 2) micro-ai-config ;; esac
       pause
       ;;
-    4) micro-hermes ;;
-    5) printf 'URL: '; IFS= read -r url; [ -z "$url" ] || browser-agent "$url"; pause ;;
-    6)
+    4)
+      echo '1. Add a memory'
+      echo '2. Recall memories'
+      echo '3. Show current context'
+      echo '4. Store an insight (self-development)'
+      echo '5. AI reflection (derive an insight)'
+      echo '6. Consolidate duplicates'
+      echo '7. Evolve identity (AI draft, applied only on y)'
+      printf 'Choose: '; IFS= read -r sub
+      case "$sub" in
+        1) micro-brain add ;;
+        2) micro-brain recall ;;
+        3) micro-brain context ;;
+        4) micro-brain learn ;;
+        5) micro-brain reflect ;;
+        6) micro-brain consolidate ;;
+        7) micro-brain evolve ;;
+      esac
+      pause
+      ;;
+    5) micro-hermes ;;
+    6) printf 'URL: '; IFS= read -r url; [ -z "$url" ] || browser-agent "$url"; pause ;;
+    7)
       echo 'Run either gui-builder --light or gui-builder --full.'
       echo 'A graphical target is selected only after installation succeeds.'
       pause
       ;;
-    7) micro-power status; echo 'Commands: micro-power enable | disable'; pause ;;
-    8) uname -a; echo; df -h /; echo; ip -brief address; pause ;;
-    9) exit 0 ;;
+    8) micro-power status; echo 'Commands: micro-power enable | disable'; pause ;;
+    9) uname -a; echo; df -h /; echo; ip -brief address; pause ;;
+    10) exit 0 ;;
     *) echo 'Invalid choice.'; sleep 1 ;;
   esac
 done

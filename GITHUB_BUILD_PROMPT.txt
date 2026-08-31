@@ -55,8 +55,12 @@ The installed system must initially be terminal-first and persistent:
 
 - Ubuntu-based amd64 system with systemd, apt, networking, a regular `micro` user, sudo, a kernel, and BIOS/UEFI bootloader support.
 - Include Python, development tools, Git, curl, wget, certificates, SSH client, rsync, jq, and NetworkManager.
-- Install MicroAI, MicroHermes, Browser Agent, persistent settings, provider configuration, local-model support, and persistent model/browser/Hermes directories.
+- Install MicroAI, MicroHermes, Browser Agent, persistent settings, provider configuration (multiple API keys, local model, and multiple signed-in Gemini web cookie accounts), auto routing between providers, and persistent model/browser/Hermes/Brain directories.
+- Auto routing must try the configured providers in order and fall back to the next available one; it must never hard-code an API key.
+- Automatically select AI models from what is available: for OpenAI-compatible endpoints with `AI_API_MODEL=auto`, query `GET /v1/models` and choose by a configurable preference (first match, else first listed); for Gemini, choose based on whether signed-in cookie accounts are present (pro/rollout models only with an account, otherwise a Flash model), and warn when a requested model is downgraded.
 - Keep `AI_RUN_AS_ROOT` disabled by default. Require explicit `ENABLE POWER MODE` confirmation before privileged AI actions. If the existing project has a safer equivalent, preserve it.
+- AI credentials must never be persisted by the tools: API keys and Gemini cookie accounts live in user-owned mode-0600 files managed by the configuration tool (never in `ai.conf`, logs, or the ISO), and unhealthy credentials may be parked briefly and retried.
+- Include a persistent, self-developing on-device memory ("brain") that is injected into AI requests: add/recall user memories, store AI-derived insights, consolidate duplicates, and evolve the machine's self-description (identity) with explicit confirmation; all state stays on the machine.
 - On first login show exactly these meaningful choices:
   1. Terminal-based system
   2. Build graphical interface
@@ -84,7 +88,7 @@ Add or repair workflows under `.github/workflows/`:
 - If loop devices are needed, explicitly test that `losetup`, partition scanning, mounting, `mkfs.ext4`, `sfdisk`, and `grub-install` work on the runner. Clean up all mounts and loop devices with a trap.
 - Upload ISO files, compressed image assets, and SHA256SUMS as workflow artifacts.
 - On version tags, publish them as GitHub Release assets.
-- Never put passwords, API keys, or tokens in the repository, ISO, logs, workflow YAML, or artifacts.
+- Never put passwords, API keys, tokens, or browser session cookies in the repository, ISO, logs, workflow YAML, or artifacts.
 - Do not require GitHub credentials inside the booted ISO. GitHub is only the public build/release location.
 
 ## Required tests before declaring success

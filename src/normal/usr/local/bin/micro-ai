@@ -1,28 +1,156 @@
 #!/usr/bin/env python3
-"""Provider-neutral MicroAI client with an explicit privilege boundary."""
+"""Provider-neutral MicroAI client with an explicit privilege boundary.
+
+Providers (see micro-ai-config):
+  local  - OpenAI-compatible endpoint served on this machine (e.g. Ollama).
+  api    - OpenAI-compatible API endpoints. Zero, one, or many API keys may
+           be configured; requests rotate through the healthy key pool.
+  gemini - signed-in Gemini web chat via browser session cookies. Several
+           accounts may be configured; requests rotate through them.
+  auto   - tries the configured routes in order (default api,gemini,local)
+           and falls back to the next available provider on failure.
+
+MicroBrain: when AI_BRAIN is enabled each request carries a compact slice of
+the machine's persistent identity and memory (/var/lib/micro-ubuntu/brain).
+
+Credential values (API keys, Gemini session cookies) are read into memory and
+are never written by this tool; only SHA-256 prefixes live in the health state.
+"""
 
 from __future__ import annotations
 
 import getpass
+import hashlib
 import json
 import os
-from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
+import uuid
+from pathlib import Path
 
 SYSTEM_CONFIG = Path("/etc/micro-ubuntu/ai.conf")
 USER_CONFIG = Path.home() / ".config/micro-ubuntu/ai.conf"
+STATE_DIR = Path("/var/lib/micro-ubuntu/ai")
+STATE_FILE = STATE_DIR / "state.json"
+try:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    pass
+
+BRAIN_DIR = Path("/var/lib/micro-ubuntu/brain")
+BRAIN_IDENTITY = BRAIN_DIR / "identity.md"
+BRAIN_MEMORIES = BRAIN_DIR / "memories.md"
+BRAIN_JOURNAL = BRAIN_DIR / "journal.log"
+BRAIN_INSIGHTS = BRAIN_DIR / "insights.md"
+
 DEFAULTS = {
-    "AI_PROVIDER": "api",
+    "AI_PROVIDER": "auto",
+    # Ordered routes used by the auto provider. Missing credentials skip a route.
+    "AI_ROUTES": "api,gemini,local",
+    "AI_BRAIN": "1",
     "AI_API_URL": "https://api.openai.com/v1/chat/completions",
-    "AI_API_MODEL": "gpt-4o-mini",
+    # "auto" asks the endpoint's /v1/models list and picks a suitable model;
+    # any other value is used verbatim.
+    "AI_API_MODEL": "auto",
+    # Optional comma-separated preference list; empty = built-in heuristic.
+    "AI_MODEL_PREFERENCE": "",
     "AI_LOCAL_URL": "http://127.0.0.1:11434/v1/chat/completions",
     "AI_LOCAL_MODEL": "llama3.2:1b",
+    "AI_GEMINI_MODEL": "gemini-auto",
+    # Paths only, never credential values. Empty = sensible defaults below.
+    "AI_API_KEYS_FILE": "",
+    "AI_GEMINI_COOKIE_FILE": "",
+    "AI_GEMINI_COOKIE_DIR": "",
     "AI_RUN_AS_ROOT": "0",
 }
+
+GEMINI_ORIGIN = "https://gemini.google.com"
+GEMINI_APP_URL = GEMINI_ORIGIN + "/app"
+GEMINI_ENDPOINT = (
+    GEMINI_ORIGIN
+    + "/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
+)
+GEMINI_FALLBACK_BL = "boq_assistant-bard-web-server_20260525.09_p0"
+GEMINI_BL_RE = re.compile(r"^boq_assistant-bard-web-server_\d{8}\.\d{2}_p\d+$")
+GEMINI_SNLM0E_RE = re.compile(r'"SNlM0e":"([^"]{10,200})"')
+GEMINI_CFB2H_RE = re.compile(r'"cfb2h":"([^"]{10,120})"')
+CHROME_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+)
+
+# Unofficial service-side model identifiers observed in the Gemini web UI.
+GEMINI_MODELS = {
+    "gemini-auto": (None, 1),
+    "gemini-3.6-flash": ("fbb127bbb056c959", 1),
+    "gemini-3.5-flash-lite": ("cf41b0e0dd7d53e5", 6),
+    "gemini-3.1-pro": ("9d8ca3786ebdfbea", 3),
+    "gemini-3.7-flash": ("56fdd199312815e2", 1),
+}
+
+GEMINI_CODE_ARTIFACT_RE = re.compile(
+    r"(?s)```(?:python|javascript|text)\?code_(?:reference|stdout)"
+    r"&code_event_index=\d+\n.*?```\n?"
+)
+GEMINI_CODE_MARKER_RE = re.compile(
+    r"```(python|javascript|text)\?code_(?:reference|stdout)&code_event_index=\d+"
+)
+
+# A key is parked for this long after consecutive failures, then retried.
+UNHEALTHY_SECONDS = 600
+# Two failures in a row marks a credential unhealthy.
+FAILURE_THRESHOLD = 2
+
+# Model auto-selection: built-in preference list (first substring match wins).
+# Overridable with AI_MODEL_PREFERENCE, e.g. "claude,gemini,qwen".
+# Free-tier router models (e.g. NaraRouter free plan) are preferred first so
+# a configured key stays within its free quota by default.
+BUILTIN_MODEL_PREFERENCE = [
+    "minimax-m3-free",
+    "glm-5.3-flash-free",
+    "agnes-2.5-flash",
+    "deepseek-v4-flash",
+    "mistral-large",
+    "qwen3.8-27b",
+    "nemotron-3-ultra",
+    "stepfun-3.7-flash",
+    "tencent-hy3-free",
+    "agnes-2.0-flash",
+    "laguna-s-2.1",
+    "gpt-4o-mini",
+    "gpt-4.1-mini",
+    "claude-3-5-haiku",
+    "gemini-2.0-flash",
+    "gemini-2.5-flash",
+    "deepseek-chat",
+    "qwen",
+    "llama-3",
+    "gpt-4o",
+    "gpt-4.1",
+    "claude",
+    "gemini",
+    "gpt-3.5",
+]
+FALLBACK_API_MODEL = "gpt-4o-mini"
+MODEL_LIST_TTL = 3600
+_MODEL_LIST_CACHE: dict[str, tuple[float, list[str]]] = {}
+
+# Gemini web models that need a signed-in session. Without one the service
+# silently downgrades to 3.5 Flash-Lite, so we pick the safe model ourselves.
+GEMINI_COOKIE_ONLY_MODELS = {"gemini-3.1-pro", "gemini-3.7-flash"}
+
+
+class GeminiError(Exception):
+    """Gemini web session error that should be shown to the user."""
+
+
+# ---- configuration -------------------------------------------------------
 
 
 def read_assignments(path: Path) -> dict[str, str]:
@@ -53,38 +181,751 @@ def configuration() -> dict[str, str]:
     return config
 
 
-def ask(prompt: str) -> int:
-    config = configuration()
-    provider = config["AI_PROVIDER"]
-    if provider == "local":
-        endpoint = config["AI_LOCAL_URL"]
-        model = config["AI_LOCAL_MODEL"]
-        token = None
-    elif provider == "api":
-        endpoint = config["AI_API_URL"]
-        model = config["AI_API_MODEL"]
-        token = os.environ.get("MICRO_AI_API_KEY") or getpass.getpass(
-            "Provider API key (kept in RAM, not saved): "
-        )
-        if not token:
-            print("No API key supplied.", file=sys.stderr)
-            return 2
-    else:
-        print(f"Unsupported AI provider: {provider}", file=sys.stderr)
-        return 2
+def brain_enabled(config: dict[str, str]) -> bool:
+    return config.get("AI_BRAIN", "1").strip() not in {"0", "no", "false", "off"}
 
+
+# ---- MicroBrain: persistent on-device consciousness ------------------------
+
+
+DEFAULT_IDENTITY = (
+    "You are MicroAI, the resident intelligence of this MicroUbuntu machine. "
+    "You run on the owner's hardware. Be concise, honest, and grounded: never "
+    "claim a command ran unless its output is shown. Privileged work requires "
+    "the owner's local power-mode confirmation. You may keep learning from the "
+    "persistent memory below; it is shared across sessions."
+)
+
+
+def ensure_brain() -> bool:
+    try:
+        BRAIN_DIR.mkdir(parents=True, exist_ok=True)
+        if not BRAIN_IDENTITY.exists():
+            BRAIN_IDENTITY.write_text(DEFAULT_IDENTITY + "\n", encoding="utf-8")
+            try:
+                BRAIN_IDENTITY.chmod(0o664)
+            except OSError:
+                pass
+        if not BRAIN_MEMORIES.exists():
+            BRAIN_MEMORIES.write_text("# MicroBrain persistent memory\n\n", encoding="utf-8")
+        if not BRAIN_INSIGHTS.exists():
+            BRAIN_INSIGHTS.write_text("# MicroBrain insights\n\n", encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
+def brain_touch() -> None:
+    """Journal one line per process so the brain has an activity log."""
+    if not ensure_brain():
+        return
+    try:
+        with BRAIN_JOURNAL.open("a", encoding="utf-8") as journal:
+            journal.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\tMicroAI session\n")
+    except OSError:
+        pass
+
+
+def brain_context(config: dict[str, str], limit: int = 6000) -> str:
+    """Assemble identity + recent memories for prompt injection."""
+    if not brain_enabled(config) or not ensure_brain():
+        return ""
+    parts: list[str] = []
+    try:
+        identity = BRAIN_IDENTITY.read_text(encoding="utf-8").strip()
+        if identity:
+            parts.append(f"[Identity]\n{identity}")
+    except OSError:
+        pass
+    try:
+        memories = BRAIN_MEMORIES.read_text(encoding="utf-8").strip()
+        if memories and memories != "# MicroBrain persistent memory":
+            if len(memories) > limit:
+                memories = memories[-limit:]
+            parts.append(f"[Persistent memory]\n{memories}")
+    except OSError:
+        pass
+    try:
+        insights = BRAIN_INSIGHTS.read_text(encoding="utf-8").strip()
+        if insights and insights != "# MicroBrain insights":
+            if len(insights) > limit:
+                insights = insights[-limit:]
+            parts.append(f"[Insights]\n{insights}")
+    except OSError:
+        pass
+    if not parts:
+        return ""
+    return "\n\n".join(parts)
+
+
+def brain_add_insight(text: str) -> bool:
+    """Self-development: append an AI-derived, durable insight to the brain."""
+    text = " ".join(text.split())
+    if not text or not ensure_brain():
+        return False
+    try:
+        with BRAIN_INSIGHTS.open("a", encoding="utf-8") as insights:
+            insights.write(
+                f"- {time.strftime('%Y-%m-%d', time.gmtime())} — [insight] {text}\n"
+            )
+        return True
+    except OSError:
+        return False
+
+
+def brain_learn_from_answer(answer: str, config: dict[str, str]) -> bool:
+    """Optional auto-learning: store a one-line insight from a completed answer.
+
+    Deliberately conservative: only used when AI_BRAIN_LEARN=1, and only the
+    first non-empty line is kept so the brain is not flooded with dumps.
+    """
+    if config.get("AI_BRAIN_LEARN", "0").strip() not in {"1", "yes", "on"}:
+        return False
+    line = next((line.strip() for line in answer.splitlines() if line.strip()), "")
+    return bool(line) and brain_add_insight(f"learned: {line[:220]}")
+
+
+def system_prompt(config: dict[str, str]) -> str:
+    base = (
+        "You are MicroAI on MicroUbuntu. Be concise and honest. "
+        "Never claim a command ran unless its output is shown. "
+        "Privileged work requires the owner's local power-mode confirmation."
+    )
+    brain = brain_context(config)
+    if brain:
+        return (
+            base
+            + "\n\nYou also carry this machine's persistent identity and memory:\n"
+            + brain
+        )
+    return base
+
+
+# ---- credential pools -----------------------------------------------------
+
+
+def _default_api_keys_file() -> Path:
+    return Path.home() / ".config/micro-ubuntu/api-keys"
+
+
+def _default_gemini_cookie_dir() -> Path:
+    return Path.home() / ".config/micro-ubuntu/gemini-cookies"
+
+
+def split_credential_text(text: str) -> list[str]:
+    """Accept newline-, comma-, or semicolon-separated credential lists."""
+    if not text:
+        return []
+    if "\n" in text:
+        parts = text.splitlines()
+    elif "," in text:
+        parts = text.split(",")
+    else:
+        parts = text.split(";")
+    values: list[str] = []
+    for part in parts:
+        value = part.strip()
+        if value:
+            values.append(value)
+    return values
+
+
+def get_api_keys(config: dict[str, str]) -> list[str]:
+    keys: list[str] = []
+    env = split_credential_text(os.environ.get("MICRO_AI_API_KEYS", ""))
+    legacy = os.environ.get("MICRO_AI_API_KEY", "").strip()
+    if legacy:
+        env.append(legacy)
+    keys.extend(env)
+    file = Path(config.get("AI_API_KEYS_FILE") or _default_api_keys_file()).expanduser()
+    try:
+        for line in file.read_text(encoding="utf-8").splitlines():
+            value = line.strip()
+            if value and not value.startswith("#"):
+                keys.append(value)
+    except OSError:
+        pass
+    seen: set[str] = set()
+    unique: list[str] = []
+    for key in keys:
+        if key not in seen:
+            seen.add(key)
+            unique.append(key)
+    return unique
+
+
+def gemini_account_paths(config: dict[str, str]) -> list[Path]:
+    paths: list[Path] = []
+    explicit = config.get("AI_GEMINI_COOKIE_FILE", "").strip()
+    if explicit:
+        paths.append(Path(explicit).expanduser())
+    directory = Path(
+        config.get("AI_GEMINI_COOKIE_DIR") or _default_gemini_cookie_dir()
+    ).expanduser()
+    try:
+        if directory.is_dir():
+            for pattern in ("*.json", "*.txt"):
+                paths.extend(sorted(directory.glob(pattern)))
+    except OSError:
+        pass
+    return paths
+
+
+def get_gemini_accounts(config: dict[str, str]) -> list[dict[str, object]]:
+    """Return [{label, header, cookies, sapisid}] with a path or export source."""
+    accounts: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for path in gemini_account_paths(config):
+        try:
+            cookies = parse_cookie_input(str(path))
+        except (GeminiError, OSError) as error:
+            continue
+        _append_gemini_account(accounts, seen, cookies, path.name)
+    # Environment override (single export or file path) is tried last.
+    env = os.environ.get("MICRO_AI_GEMINI_COOKIES") or os.environ.get(
+        "MICRO_AI_GEMINI_COOKIE"
+    ) or ""
+    if env.strip():
+        source = env.strip()
+        try:
+            cookies = parse_cookie_input(source)
+            _append_gemini_account(accounts, seen, cookies, "environment")
+        except (GeminiError, OSError, json.JSONDecodeError):
+            pass
+    return accounts
+
+
+def _append_gemini_account(
+    accounts: list[dict[str, object]], seen: set[str], cookies: dict[str, str], label: str
+) -> None:
+    if not cookies:
+        return
+    header = cookie_header_from_cookies(cookies)
+    if not extract_cookie(cookies, "SAPISID"):
+        return
+    digest = hashlib.sha256(header.encode("utf-8")).hexdigest()[:24]
+    if digest in seen:
+        return
+    seen.add(digest)
+    accounts.append(
+        {
+            "label": label,
+            "cookies": cookies,
+            "header": header,
+            "sapisid": extract_cookie(cookies, "SAPISID"),
+        }
+    )
+
+
+def credential_id(kind: str, credential: str) -> str:
+    digest = hashlib.sha256(f"{kind}\0{credential}".encode("utf-8")).hexdigest()
+    return digest[:16]
+
+
+# ---- credential health state (no secrets, just prefixes) ------------------
+
+
+_STATE: dict[str, object] | None = None
+_STATE_DIRTY = False
+
+
+def _read_state() -> dict[str, object]:  # noqa: D401 - internal helper
+    global _STATE
+    if _STATE is not None:
+        return _STATE
+    try:
+        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        _STATE = data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        _STATE = {}
+    return _STATE
+
+
+def _write_state() -> None:
+    global _STATE_DIRTY
+    if not _STATE_DIRTY or _STATE is None:
+        return
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(_STATE, indent=2), encoding="utf-8")
+        tmp.chmod(0o600)
+        os.replace(tmp, STATE_FILE)
+        _STATE_DIRTY = False
+    except OSError:
+        pass
+
+
+def _entry(kind: str, cid: str) -> dict[str, object]:
+    state = _read_state()
+    entries = state.setdefault(kind, {})
+    if not isinstance(entries, dict):
+        entries = {}
+        state[kind] = entries
+    entry = entries.setdefault(cid, {})
+    if not isinstance(entry, dict):
+        entry = {}
+        entries[cid] = entry
+    return entry
+
+
+def order_credentials(kind: str, credentials: list[str]) -> list[tuple[str, str]]:
+    """Order [(credential, id)] healthy-first, least-recently-used first."""
+    now = time.time()
+    ordered = []
+    for credential in credentials:
+        cid = credential_id(kind, credential)
+        entry = _entry(kind, cid)
+        until = float(entry.get("unhealthy_until", 0) or 0)
+        parked = until > now
+        last_used = float(entry.get("last_used", 0) or 0)
+        ordered.append((credential, cid, parked, last_used))
+    ordered.sort(key=lambda item: (item[2], item[3]))
+    return [(credential, cid) for credential, cid, _, _ in ordered]
+
+
+def mark_credential_success(kind: str, cid: str) -> None:
+    global _STATE_DIRTY
+    entry = _entry(kind, cid)
+    entry["last_used"] = time.time()
+    entry["failures"] = 0
+    entry.pop("unhealthy_until", None)
+    _STATE_DIRTY = True
+    _write_state()
+
+
+def mark_credential_failure(kind: str, cid: str) -> None:
+    global _STATE_DIRTY
+    entry = _entry(kind, cid)
+    failures = int(entry.get("failures", 0) or 0) + 1
+    entry["failures"] = failures
+    entry["last_used"] = time.time()
+    if failures >= FAILURE_THRESHOLD:
+        entry["unhealthy_until"] = time.time() + UNHEALTHY_SECONDS
+    _STATE_DIRTY = True
+    _write_state()
+
+
+# ---- Gemini cookie handling ----------------------------------------------
+
+
+def cookies_from_json(data: object) -> dict[str, str]:
+    """Accept Chrome cookie-export shapes: [{name,value},...] or {name:value}."""
+    cookies: dict[str, str] = {}
+    if isinstance(data, dict):
+        if isinstance(data.get("cookies"), (dict, list)):
+            data = data["cookies"]
+        else:
+            for key, value in data.items():
+                if isinstance(key, str) and isinstance(value, (str, int)):
+                    cookies[key] = str(value)
+            return cookies
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                name = item.get("name")
+                value = item.get("value")
+                if isinstance(name, str) and isinstance(value, (str, int)):
+                    cookies[name] = str(value)
+    return cookies
+
+
+def cookies_from_header(text: str) -> dict[str, str]:
+    cookies: dict[str, str] = {}
+    for pair in text.split(";"):
+        pair = pair.strip()
+        if not pair or "=" not in pair:
+            continue
+        name, value = pair.split("=", 1)
+        name = name.strip()
+        if name:
+            cookies[name] = value.strip()
+    return cookies
+
+
+def cookies_from_netscape(text: str) -> dict[str, str]:
+    """Parse a cookies.txt/curl export (tab separated, #HttpOnly_ comments)."""
+    cookies: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.rstrip("\n")
+        if not line or (line.startswith("#") and not line.startswith("#HttpOnly_")):
+            continue
+        fields = line.split("\t")
+        if len(fields) < 7:
+            continue
+        name, value = fields[5].strip(), fields[6].strip()
+        if name:
+            cookies[name] = value
+    return cookies
+
+
+def parse_cookie_input(text: str) -> dict[str, str]:
+    """Accept JSON export, a Name=Value; ... string, or a path to such a file."""
+    text = text.strip()
+    if not text:
+        return {}
+    candidate = Path(text).expanduser()
+    if candidate.is_file():
+        text = candidate.read_text(encoding="utf-8", errors="replace").strip()
+        if not text:
+            return {}
+    if text.startswith("[") or text.startswith("{"):
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as error:
+            raise GeminiError(f"invalid cookie JSON: {error}") from error
+        return cookies_from_json(data)
+    if "\t" in text:
+        return cookies_from_netscape(text)
+    if "=" in text:
+        return cookies_from_header(text)
+    raise GeminiError("cookie input is neither JSON, Name=Value pairs, nor a file path")
+
+
+def cookie_header_from_cookies(cookies: dict[str, str]) -> str:
+    return "; ".join(f"{name}={value}" for name, value in cookies.items())
+
+
+def extract_cookie(cookies: dict[str, str], name: str) -> str | None:
+    value = cookies.get(name)
+    if value is None:
+        value = next((v for k, v in cookies.items() if k.lower() == name.lower()), None)
+    return value
+
+
+def prompt_cookie_input() -> str:
+    """Read cookie JSON/string from the terminal. JSON paste ends with a blank line."""
+    sys.stderr.write(
+        "No Gemini cookie file is configured. Paste the browser cookie export\n"
+        "(JSON array from the browser cookie exporter, or 'Name=Value; ...')\n"
+        "and press Enter on an empty line: "
+    )
+    sys.stderr.flush()
+    lines: list[str] = []
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            break
+        line = line.rstrip("\n").rstrip("\r")
+        if not line:
+            break
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+# ---- Gemini web RPC ------------------------------------------------------
+
+
+def sapisid_hash(sapisid: str, timestamp: int | None = None) -> str:
+    ts = int(time.time()) if timestamp is None else int(timestamp)
+    digest = hashlib.sha1(f"{ts} {sapisid} {GEMINI_ORIGIN}".encode("utf-8")).hexdigest()
+    return f"SAPISIDHASH {ts}_{digest}"
+
+
+_APP_TOKENS: dict[str, tuple[float, str, str]] = {}
+
+
+def _app_cache_key(cookie_header: str) -> str:
+    return hashlib.sha256(cookie_header.encode("utf-8")).hexdigest()[:32]
+
+
+def fetch_app_tokens(cookie_header: str, timeout: int = 60) -> tuple[str, str]:
+    """Fetch (XSRF token, bl version) for a signed-in session."""
+    key = _app_cache_key(cookie_header)
+    cached = _APP_TOKENS.get(key)
+    if cached and time.time() - cached[0] < 20 * 60:
+        return cached[1], cached[2]
+    headers = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "User-Agent": CHROME_UA,
+        "Cookie": cookie_header,
+    }
+    request = urllib.request.Request(GEMINI_APP_URL, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as error:
+        raise GeminiError(f"session page returned HTTP {error.code}") from error
+    except (urllib.error.URLError, TimeoutError) as error:
+        raise GeminiError(f"session page fetch failed: {error}") from error
+    match = GEMINI_SNLM0E_RE.search(body)
+    if not match:
+        raise GeminiError(
+            "no SNlM0e token found; cookies are expired, signed out, or no "
+            "longer accepted by the web endpoint"
+        )
+    xsrf = match.group(1)
+    bl = GEMINI_FALLBACK_BL
+    bl_match = GEMINI_CFB2H_RE.search(body)
+    if bl_match and GEMINI_BL_RE.fullmatch(bl_match.group(1)):
+        bl = bl_match.group(1)
+    _APP_TOKENS[key] = (time.time(), xsrf, bl)
+    return xsrf, bl
+
+
+def gemini_model_config(model: str) -> tuple[str | None, int]:
+    entry = GEMINI_MODELS.get(model.strip())
+    if entry is None:
+        raise GeminiError(
+            f"unknown Gemini web model '{model}'. Known: "
+            + ", ".join(sorted(GEMINI_MODELS))
+        )
+    return entry
+
+
+def build_gemini_request(
+    prompt: str,
+    model: str,
+    cookies: dict[str, str],
+    xsrf: str,
+    bl: str,
+) -> tuple[str, bytes, dict[str, str]]:
+    hex_id, mode = gemini_model_config(model)
+    cookie_header = cookie_header_from_cookies(cookies)
+    sapisid = extract_cookie(cookies, "SAPISID") or ""
+    req_uuid = str(uuid.uuid4())
+    model_uuid = str(uuid.uuid4())
+
+    inner: list[object] = [None] * 97
+    inner[0] = [prompt, 0, None, None, None, None, 0]
+    inner[1] = ["en"]
+    inner[2] = ["", "", "", None, None, None, None, None, None, ""]
+    inner[6] = [0]
+    inner[7] = 1
+    inner[10] = 1
+    inner[11] = 0
+    inner[17] = [0]
+    inner[18] = 0
+    inner[27] = 1
+    inner[30] = [4]
+    inner[41] = [1]
+    inner[53] = 0
+    inner[59] = req_uuid
+    inner[61] = []
+    inner[68] = 1
+    inner[79] = mode
+    inner[80] = 1
+    inner[91] = 0
+    inner[96] = 0
+
+    outer = json.dumps([None, json.dumps(inner)], separators=(",", ":"))
+    form: dict[str, str] = {"f.req": outer}
+    if xsrf:
+        form["at"] = xsrf
+
+    endpoint = (
+        f"{GEMINI_ENDPOINT}?bl={urllib.parse.quote(bl)}&hl=en"
+        f"&_reqid={int(time.time()) % 1000000}&rt=c"
+    )
+    body = urllib.parse.urlencode(form).encode("utf-8")
+
+    headers = {
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+        "Origin": GEMINI_ORIGIN,
+        "Referer": GEMINI_APP_URL,
+        "User-Agent": CHROME_UA,
+        "X-Same-Domain": "1",
+        "X-Goog-AuthUser": "0",
+        "x-goog-ext-73010989-jspb": "[0]",
+        "x-goog-ext-73010990-jspb": "[0,0,0]",
+    }
+    if cookie_header:
+        headers["Cookie"] = cookie_header
+    if sapisid:
+        headers["Authorization"] = sapisid_hash(sapisid)
+    if hex_id:
+        model_header = (
+            f'[1,null,null,null,"{hex_id}",null,null,0,[4,5,6,8],null,null,1,'
+            f'null,null,{mode},1,"{model_uuid}"]'
+        )
+        headers["x-goog-ext-525001261-jspb"] = model_header
+    headers["x-goog-ext-525005358-jspb"] = f'["{req_uuid}",1]'
+    return endpoint, body, headers
+
+
+def clean_gemini_text(text: str) -> str:
+    cleaned = GEMINI_CODE_ARTIFACT_RE.sub("", text)
+    cleaned = re.sub(r"\n{2,}", "\n", cleaned)
+    return cleaned.strip()
+
+
+def texts_in_line(line: str) -> list[str]:
+    if '"wrb.fr"' not in line or len(line) < 200:
+        return []
+    try:
+        envelope = json.loads(line)
+    except json.JSONDecodeError:
+        return []
+    if (
+        not isinstance(envelope, list)
+        or not envelope
+        or not isinstance(envelope[0], list)
+        or len(envelope[0]) < 3
+        or not isinstance(envelope[0][2], str)
+    ):
+        return []
+    inner = json.loads(envelope[0][2])
+    if not isinstance(inner, list) or len(inner) <= 4 or not isinstance(inner[4], list):
+        return []
+    texts: list[str] = []
+    for part in inner[4]:
+        if not isinstance(part, list) or len(part) < 2:
+            continue
+        chunks = part[1]
+        if not isinstance(chunks, list):
+            continue
+        for chunk in chunks:
+            if isinstance(chunk, str) and chunk:
+                texts.append(chunk)
+    return texts
+
+
+def extract_gemini_text(raw: str) -> str:
+    texts: list[str] = []
+    for line in raw.splitlines():
+        texts.extend(texts_in_line(line))
+    for text in reversed(texts):
+        cleaned = clean_gemini_text(text)
+        if cleaned:
+            return cleaned
+        fallback = GEMINI_CODE_MARKER_RE.sub(r"```\1", text).strip()
+        if fallback:
+            return fallback
+    return ""
+
+
+def has_gemini_content(raw: str) -> bool:
+    for line in raw.splitlines():
+        if texts_in_line(line):
+            return True
+    return False
+
+
+# ---- automatic model selection --------------------------------------------
+
+
+def api_base_url(endpoint: str) -> str:
+    base = endpoint.strip().rstrip("/")
+    suffix = "/chat/completions"
+    if base.endswith(suffix):
+        base = base[: -len(suffix)]
+    return base.rstrip("/")
+
+
+def list_api_models(base: str, token: str | None, timeout: int = 20) -> list[str]:
+    """Query an OpenAI-compatible endpoint's /v1/models list (best effort)."""
+    models: list[str] = []
+    try:
+        url = base.rstrip("/") + "/models"
+        headers = {"Accept": "application/json", "User-Agent": CHROME_UA}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        request = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = json.load(response)
+        rows: list[object] = []
+        if isinstance(data, dict):
+            rows = data.get("data") or data.get("models") or []
+        elif isinstance(data, list):
+            rows = data
+        for row in rows:
+            if isinstance(row, str):
+                models.append(row)
+            elif isinstance(row, dict) and isinstance(row.get("id"), str):
+                models.append(str(row["id"]))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+        return []
+    seen: set[str] = set()
+    unique: list[str] = []
+    for model in models:
+        model = model.strip()
+        if model and model.lower() not in seen:
+            seen.add(model.lower())
+            unique.append(model)
+    return unique
+
+
+def pick_api_model(models: list[str], preference: str = "") -> str:
+    if not models:
+        return ""
+    prefs = [
+        p.strip().lower()
+        for p in split_credential_text(preference)
+        if p.strip()
+    ] or BUILTIN_MODEL_PREFERENCE
+    for wanted in prefs:
+        for model in models:
+            if wanted in model.lower():
+                return model
+    return models[0]
+
+
+def resolve_api_model(
+    config: dict[str, str], token: str | None = None, timeout: int = 20
+) -> str:
+    """Return the model to use; 'auto' negotiates via the endpoint's model list."""
+    configured = (config.get("AI_API_MODEL") or "auto").strip()
+    if configured and configured != "auto":
+        return configured
+    base = api_base_url(config.get("AI_API_URL", ""))
+    if not base.startswith("http"):
+        return FALLBACK_API_MODEL
+    cache_key = base + "#" + (credential_id("api", token) if token else "anon")
+    now = time.time()
+    cached = _MODEL_LIST_CACHE.get(cache_key)
+    if cached and now - cached[0] < MODEL_LIST_TTL:
+        picked = pick_api_model(cached[1], config.get("AI_MODEL_PREFERENCE", ""))
+        if picked:
+            return picked
+    models = list_api_models(base, token, timeout)
+    if models:
+        _MODEL_LIST_CACHE[cache_key] = (now, models)
+        picked = pick_api_model(models, config.get("AI_MODEL_PREFERENCE", ""))
+        if picked:
+            entry = _entry("model", credential_id("model", base))
+            entry["name"] = picked
+            entry["at"] = time.time()
+            global _STATE_DIRTY
+            _STATE_DIRTY = True
+            _write_state()
+            return picked
+    # Model list unavailable: reuse the last learned value, else fall back.
+    entry = _entry("model", credential_id("model", base))
+    seen = entry.get("name")
+    if isinstance(seen, str) and seen:
+        return seen
+    return FALLBACK_API_MODEL
+
+
+def resolve_gemini_model(configured: str | None, has_accounts: bool) -> tuple[str, bool]:
+    """(model, downgraded) based on what the current cookie pool permits."""
+    name = (configured or "auto").strip() or "auto"
+    if name == "auto":
+        return ("gemini-3.6-flash" if has_accounts else "gemini-3.5-flash-lite"), False
+    if name in GEMINI_COOKIE_ONLY_MODELS and not has_accounts:
+        return "gemini-3.5-flash-lite", True
+    return name, False
+
+
+# ---- providers ------------------------------------------------------------
+
+
+def openai_chat(
+    prompt: str,
+    endpoint: str,
+    model: str,
+    token: str | None,
+    timeout: int,
+    config: dict[str, str],
+) -> str:
     payload = json.dumps(
         {
             "model": model,
             "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are MicroAI on MicroUbuntu. Be concise and honest. "
-                        "Never claim a command ran unless its output is shown. "
-                        "Privileged work requires the owner's local power-mode confirmation."
-                    ),
-                },
+                {"role": "system", "content": system_prompt(config)},
                 {"role": "user", "content": prompt},
             ],
         }
@@ -94,16 +935,273 @@ def ask(prompt: str) -> int:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(endpoint, data=payload, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             result = json.load(response)
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
-        print(f"AI request failed: {error}", file=sys.stderr)
-        return 1
+        raise GeminiError(f"AI request failed: {error}") from error
     try:
-        print(result["choices"][0]["message"]["content"])
-    except (KeyError, IndexError, TypeError):
-        print(json.dumps(result, indent=2))
+        content = result["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as error:
+        raise GeminiError(f"unexpected provider response: {json.dumps(result)[:300]}") from error
+    return content
+
+
+def ask_local(prompt: str, config: dict[str, str], timeout: int = 120) -> int:
+    endpoint = config["AI_LOCAL_URL"]
+    model = config["AI_LOCAL_MODEL"]
+    try:
+        print(openai_chat(prompt, endpoint, model, None, timeout, config))
+    except GeminiError as error:
+        print(str(error), file=sys.stderr)
+        return 1
     return 0
+
+
+def ask_api(
+    prompt: str,
+    config: dict[str, str],
+    key: str | None = None,
+    timeout: int = 120,
+) -> int:
+    endpoint = config["AI_API_URL"]
+    keys = get_api_keys(config)
+    if key is None:
+        if not keys and sys.stdin.isatty():
+            key = getpass.getpass("Provider API key (kept in RAM, not saved): ")
+            keys = [key] if key else []
+        elif not keys:
+            print("No API key supplied.", file=sys.stderr)
+            return 2
+        key = order_credentials("api", keys)[0][0]
+    model = resolve_api_model(config, token=key)
+    cid = credential_id("api", key)
+    try:
+        content = openai_chat(prompt, endpoint, model, key, timeout, config)
+    except GeminiError as error:
+        mark_credential_failure("api", cid)
+        print(str(error), file=sys.stderr)
+        return 1
+    mark_credential_success("api", cid)
+    print(content)
+    brain_learn_from_answer(content, config)
+    return 0
+
+
+def ask_gemini(
+    prompt: str,
+    config: dict[str, str],
+    account: dict[str, object] | None = None,
+    app_timeout: int = 60,
+    request_timeout: int = 180,
+) -> int:
+    configured_model = (
+        config.get("AI_GEMINI_MODEL") or DEFAULTS["AI_GEMINI_MODEL"]
+    )
+    accounts = get_gemini_accounts(config)
+    if account is None:
+        if not accounts:
+            if sys.stdin.isatty():
+                source = prompt_cookie_input()
+                if not source:
+                    print("No Gemini cookies supplied.", file=sys.stderr)
+                    return 2
+                try:
+                    cookies = parse_cookie_input(source)
+                except (GeminiError, json.JSONDecodeError) as error:
+                    print(f"Gemini cookie import failed: {error}", file=sys.stderr)
+                    return 2
+                interactive: list[dict[str, object]] = []
+                _append_gemini_account(interactive, set(), cookies, "session")
+                if not interactive:
+                    print("No Gemini cookies imported.", file=sys.stderr)
+                    return 2
+                accounts = interactive
+            else:
+                print(
+                    "No Gemini cookies available. Run micro-ai-config or put "
+                    "cookie exports in ~/.config/micro-ubuntu/gemini-cookies/.",
+                    file=sys.stderr,
+                )
+                return 2
+        # Direct provider call without an explicit account: rotate the pool.
+        headers = [str(a["header"]) for a in accounts]
+        first_header = order_credentials("gemini", headers)[0][0]
+        account = next(
+            (a for a in accounts if str(a["header"]) == first_header), accounts[0]
+        )
+    if "cookies" not in account:
+        print("No Gemini cookies available.", file=sys.stderr)
+        return 2
+    # Pick the model the available cookie pool is allowed to use.
+    model, downgraded = resolve_gemini_model(configured_model, bool(accounts))
+    if downgraded:
+        print(
+            f"Gemini model '{configured_model}' needs a signed-in session; "
+            f"using '{model}' instead. Add a cookie account to enable it.",
+            file=sys.stderr,
+        )
+    header = str(account["header"])
+    cid = credential_id("gemini", header)
+    try:
+        xsrf, bl = fetch_app_tokens(header, timeout=app_timeout)
+    except GeminiError as error:
+        mark_credential_failure("gemini", cid)
+        print(f"Gemini session check failed: {error}", file=sys.stderr)
+        return 1
+
+    brain = brain_context(config)
+    if brain:
+        prompt = (
+            "[System instruction] You are MicroAI on MicroUbuntu. Be concise "
+            "and honest. Never claim a command ran unless its output is shown. "
+            "Privileged work requires the owner's local power-mode confirmation.\n\n"
+            f"{brain}\n\n[User request]\n{prompt}"
+        )
+
+    for attempt in range(2):
+        endpoint, body, headers = build_gemini_request(
+            prompt, model, dict(account["cookies"]), xsrf, bl
+        )
+        request = urllib.request.Request(
+            endpoint, data=body, headers=headers, method="POST"
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=request_timeout) as response:
+                raw = response.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as error:
+            detail = ""
+            try:
+                detail = error.read().decode("utf-8", "replace")[:200]
+            except Exception:
+                pass
+            if (
+                error.code == 400
+                and '"xsrf"' in detail
+                and attempt == 0
+                and xsrf
+            ):
+                _APP_TOKENS.pop(_app_cache_key(header), None)
+                try:
+                    xsrf, bl = fetch_app_tokens(header, timeout=app_timeout)
+                except GeminiError as refresh_error:
+                    mark_credential_failure("gemini", cid)
+                    print(
+                        f"Gemini session refresh failed: {refresh_error}",
+                        file=sys.stderr,
+                    )
+                    return 1
+                continue
+            print(
+                f"Gemini request failed (HTTP {error.code}): {detail}",
+                file=sys.stderr,
+            )
+            mark_credential_failure("gemini", cid)
+            return 1
+        except (urllib.error.URLError, TimeoutError) as error:
+            print(f"Gemini request failed: {error}", file=sys.stderr)
+            mark_credential_failure("gemini", cid)
+            return 1
+        text = extract_gemini_text(raw)
+        if text:
+            mark_credential_success("gemini", cid)
+            print(text)
+            brain_learn_from_answer(text, config)
+            return 0
+        if attempt == 0 and not has_gemini_content(raw):
+            time.sleep(2)
+            continue
+        print(
+            "Gemini returned no content. The web endpoint is unofficial; a "
+            "transient refusal or an upstream change may be involved.",
+            file=sys.stderr,
+        )
+        mark_credential_failure("gemini", cid)
+        return 1
+    print("Gemini returned no content after retrying.", file=sys.stderr)
+    return 1
+
+
+# ---- auto routing --------------------------------------------------------
+
+
+def ask_auto(prompt: str, config: dict[str, str]) -> int:
+    routes = config.get("AI_ROUTES", DEFAULTS["AI_ROUTES"]).split(",")
+    failures: list[str] = []
+    for route in routes:
+        route = route.strip()
+        if not route:
+            continue
+        if route == "local":
+            try:
+                rc = ask_local(prompt, config, timeout=60)
+            except Exception as error:  # defensive; provider code returns codes
+                rc = 1
+                print(f"Local AI failed: {error}", file=sys.stderr)
+            if rc == 0:
+                print("MicroAI route: local", file=sys.stderr)
+                return 0
+            failures.append(f"local (rc={rc})")
+            continue
+        if route == "api":
+            keys = get_api_keys(config)
+            if not keys:
+                failures.append("api (no keys configured)")
+                continue
+            ordered = order_credentials("api", keys)
+            for key, cid in ordered:
+                rc = ask_api(prompt, config, key=key, timeout=60)
+                if rc == 0:
+                    # ask_api marked success; report which key was used.
+                    print(f"MicroAI route: api (key {cid[:6]}…)", file=sys.stderr)
+                    return 0
+                failures.append(f"api (key {cid[:6]}…, rc={rc})")
+            continue
+        if route == "gemini":
+            accounts = get_gemini_accounts(config)
+            if not accounts:
+                failures.append("gemini (no cookie accounts configured)")
+                continue
+            # Rotate accounts by last-use using their headers as identity.
+            headers = [str(a["header"]) for a in accounts]
+            ordered_headers = [
+                header
+                for header, _ in order_credentials("gemini", headers)
+            ]
+            by_header = {str(a["header"]): a for a in accounts}
+            for header in ordered_headers:
+                account = by_header.get(header)
+                if account is None:
+                    continue
+                label = str(account.get("label", "cookie"))
+                rc = ask_gemini(
+                    prompt, config, account=account, app_timeout=30, request_timeout=90
+                )
+                if rc == 0:
+                    print(f"MicroAI route: gemini ({label})", file=sys.stderr)
+                    return 0
+                failures.append(f"gemini ({label}, rc={rc})")
+            continue
+        failures.append(f"{route} (unknown route)")
+    print(
+        "Auto routing exhausted all providers:\n  " + "\n  ".join(failures),
+        file=sys.stderr,
+    )
+    return 1
+
+
+def ask(prompt: str) -> int:
+    config = configuration()
+    provider = config["AI_PROVIDER"]
+    if provider == "auto":
+        return ask_auto(prompt, config)
+    if provider == "gemini":
+        return ask_gemini(prompt, config)
+    if provider == "local":
+        return ask_local(prompt, config)
+    if provider == "api":
+        return ask_api(prompt, config)
+    print(f"Unsupported AI provider: {provider}", file=sys.stderr)
+    return 2
 
 
 def run_command(arguments: list[str], as_root: bool) -> int:
@@ -132,7 +1230,11 @@ def run_command(arguments: list[str], as_root: bool) -> int:
 
 
 def main() -> int:
-    Path("/var/lib/micro-ubuntu/models").mkdir(parents=True, exist_ok=True)
+    try:
+        Path("/var/lib/micro-ubuntu/models").mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    brain_touch()
     if len(sys.argv) < 2:
         prompt = input("micro-ai> ").strip()
         return ask(prompt) if prompt else 0
@@ -142,8 +1244,33 @@ def main() -> int:
         return run_command(sys.argv[2:], as_root=False)
     if sys.argv[1] == "--root-run":
         return run_command(sys.argv[2:], as_root=True)
+    if sys.argv[1] == "--learn":
+        text = " ".join(sys.argv[2:]).strip()
+        if not text:
+            text = input("Insight to store in the brain: ").strip()
+        if not text:
+            print("Nothing to store.", file=sys.stderr)
+            return 2
+        return 0 if brain_add_insight(text) else 1
+    if sys.argv[1] == "--insights":
+        try:
+            print(BRAIN_INSIGHTS.read_text(encoding="utf-8").strip())
+        except OSError:
+            print("No insights stored yet.", file=sys.stderr)
+            return 1
+        return 0
     if sys.argv[1] in {"-h", "--help"}:
-        print("Usage: micro-ai [prompt] | configure | --run COMMAND | --root-run COMMAND")
+        print(
+            "Usage: micro-ai [prompt] | configure | --run COMMAND | --root-run COMMAND\n"
+            "  --learn TEXT          store a durable insight in the brain\n"
+            "  --insights            show stored brain insights\n"
+            "Providers: api (one or many keys, model auto-selection), gemini\n"
+            "(one or many cookie accounts), local, auto (routes through\n"
+            "whichever provider works). Brain: micro-brain add|recall|context\n"
+            "|learn|reflect|consolidate|evolve (self-developing memory).\n"
+            "Model selection: API model 'auto' negotiates /v1/models; Gemini\n"
+            "models are limited to what your cookie accounts allow."
+        )
         return 0
     return ask(" ".join(sys.argv[1:]))
 

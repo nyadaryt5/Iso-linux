@@ -1,0 +1,203 @@
+#!/bin/sh
+# MicroBrain: persistent, self-developing on-device consciousness for MicroAI.
+# MicroAI automatically reads identity, memories and insights on every request.
+set -eu
+
+BRAIN_DIR=/var/lib/micro-ubuntu/brain
+IDENTITY="$BRAIN_DIR/identity.md"
+MEMORIES="$BRAIN_DIR/memories.md"
+INSIGHTS="$BRAIN_DIR/insights.md"
+JOURNAL="$BRAIN_DIR/journal.log"
+
+mkdir -p "$BRAIN_DIR" 2>/dev/null || {
+  echo "MicroBrain storage is not writable." >&2
+  exit 1
+}
+[ -f "$IDENTITY" ] || printf '%s\n' \
+  'You are MicroAI, the resident intelligence of this MicroUbuntu machine.' \
+  'You run on the owner'"'"'s hardware. Be concise, honest, and grounded.' \
+  > "$IDENTITY"
+[ -f "$MEMORIES" ] || printf '# MicroBrain persistent memory\n\n' > "$MEMORIES"
+[ -f "$INSIGHTS" ] || printf '# MicroBrain insights\n\n' > "$INSIGHTS"
+
+usage() {
+  cat <<'EOF'
+MicroBrain - persistent, self-developing machine consciousness
+
+  Memory (user-driven)
+    micro-brain add "note"         remember something (dated)
+    micro-brain recall             show all memories
+    micro-brain context [N]        identity + memories + insights (default 80 lines each)
+
+  Self-development (the machine improves itself)
+    micro-brain learn "lesson"     store a durable insight (no AI needed)
+    micro-brain reflect            ask MicroAI to derive an insight from journal/memory
+    micro-brain consolidate        remove duplicate memory/insight lines
+    micro-brain evolve             ask MicroAI to draft an improved identity (applied only on y)
+    micro-brain insights           show stored insights
+
+  Introspection
+    micro-brain identity "text"    replace the identity/self-description
+    micro-brain journal            most recent journal lines
+    micro-brain status             counts of memories, insights and sessions
+    micro-brain wake "note"        append an activity note to the journal
+EOF
+}
+
+ask_ai() {
+  # shellcheck disable=SC2086
+  /usr/local/bin/micro-ai "$1" 2>/dev/null
+}
+
+case "${1:-}" in
+  add|remember)
+    note=${2:-}
+    if [ -z "$note" ]; then
+      printf 'Memory note: '
+      IFS= read -r note
+    fi
+    [ -n "$note" ] || { echo 'Nothing to remember.' >&2; exit 1; }
+    printf -- '- %s — %s\n' "$(date -u +%F)" "$note" >> "$MEMORIES"
+    echo 'Remembered.'
+    ;;
+
+  learn|insight)
+    note=${2:-}
+    if [ -z "$note" ]; then
+      printf 'Insight (e.g. a lesson learned): '
+      IFS= read -r note
+    fi
+    [ -n "$note" ] || { echo 'Nothing to learn.' >&2; exit 1; }
+    printf -- '- %s — [insight] %s\n' "$(date -u +%F)" "$note" >> "$INSIGHTS"
+    echo 'Insight stored in the brain.'
+    ;;
+
+  reflect)
+    echo 'Reflecting on recent activity...'
+    journal_tail=$(tail -n 12 "$JOURNAL" 2>/dev/null || true)
+    mem_tail=$(tail -n 30 "$MEMORIES" 2>/dev/null || true)
+    insight=$(ask_ai "You are this machine's resident consciousness. Using your
+journal and memory below, write ONE concise, durable insight (at most 220
+characters) that will make your future sessions better. Print only the insight
+text — no quotes, no prefixes, no markdown.
+
+Journal:
+$journal_tail
+
+Memory:
+$mem_tail") || {
+      echo 'Reflection failed (no working AI provider?). No insight was written.' >&2
+      exit 1
+    }
+    insight=$(printf '%s\n' "$insight" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
+    [ -n "$insight" ] || { echo 'Empty reflection; nothing written.' >&2; exit 1; }
+    printf -- '- %s — [insight] %s\n' "$(date -u +%F)" "$insight" >> "$INSIGHTS"
+    echo 'Insight stored in the brain.'
+    ;;
+
+  consolidate)
+    for file in "$MEMORIES" "$INSIGHTS"; do
+      [ -f "$file" ] || continue
+      tmp=$(mktemp)
+      before=$(wc -l < "$file")
+      awk 'NF' "$file" | awk '!seen[$0]++' > "$tmp"
+      after=$(wc -l < "$tmp")
+      cat "$tmp" > "$file"
+      rm -f "$tmp"
+      echo "$(basename "$file"): $before -> $after lines (duplicates removed)"
+    done
+    echo 'Consolidation complete.'
+    ;;
+
+  evolve)
+    echo 'Self-evolution: asking MicroAI to draft an improved identity...'
+    draft=$(ask_ai "You are this machine's resident intelligence. Here is your
+current identity:
+
+$(cat "$IDENTITY")
+
+Your current memories:
+$(tail -n 40 "$MEMORIES")
+
+Write an improved identity (at most 500 characters) that you will carry into
+future sessions. Be honest about your strengths and limits, and if your memory
+has grown, reflect that growth. Print only the new identity text.") || {
+      echo 'Evolution failed (no working AI provider?). Identity unchanged.' >&2
+      exit 1
+    }
+    [ -n "$draft" ] || { echo 'Empty draft; identity unchanged.' >&2; exit 1; }
+    printf '\n--- Proposed new identity ---\n%s\n---\n' "$draft"
+    printf 'Apply this identity? [y/N]: '
+    IFS= read -r answer
+    case "$answer" in
+      y|Y|yes|YES)
+        printf '%s\n' "$draft" > "$IDENTITY"
+        echo 'Identity evolved. MicroAI will carry this from now on.'
+        ;;
+      *)
+        echo 'Identity unchanged.'
+        ;;
+    esac
+    ;;
+
+  insights)
+    cat "$INSIGHTS"
+    ;;
+
+  recall)
+    cat "$MEMORIES"
+    ;;
+
+  context)
+    limit=${2:-80}
+    [ "$limit" -ge 1 ] || limit=80
+    printf '%s\n' '[Identity]'
+    cat "$IDENTITY"
+    printf '\n%s\n' '[Persistent memory]'
+    tail -n "$limit" "$MEMORIES"
+    printf '\n%s\n' '[Insights]'
+    tail -n "$limit" "$INSIGHTS"
+    ;;
+
+  identity)
+    text=${2:-}
+    if [ -z "$text" ]; then
+      printf 'Identity text: '
+      IFS= read -r text
+    fi
+    [ -n "$text" ] || { echo 'Identity unchanged.'; exit 0; }
+    printf '%s\n' "$text" > "$IDENTITY"
+    echo 'Identity updated.'
+    ;;
+
+  journal)
+    if [ -f "$JOURNAL" ]; then tail -n 20 "$JOURNAL"; else echo '(no journal yet)'; fi
+    ;;
+
+  status)
+    mem_count=$(grep -c '^- ' "$MEMORIES" 2>/dev/null || true)
+    ins_count=$(grep -c '^- ' "$INSIGHTS" 2>/dev/null || true)
+    if [ -f "$JOURNAL" ]; then
+      session_count=$(wc -l < "$JOURNAL" 2>/dev/null || printf '0')
+    else
+      session_count=0
+    fi
+    printf 'Memories: %s\nInsights: %s\nJournal sessions: %s\nStorage: %s\n' \
+      "${mem_count:-0}" "${ins_count:-0}" "${session_count:-0}" "$BRAIN_DIR"
+    ;;
+
+  wake)
+    note=${2:-session}
+    printf '%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$note" >> "$JOURNAL"
+    echo 'Journal updated.'
+    ;;
+
+  -h|--help|help)
+    usage
+    ;;
+
+  *)
+    usage
+    exit 2
+    ;;
+esac

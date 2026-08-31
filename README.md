@@ -98,7 +98,43 @@ A one-time local-console autologin reaches the first-login chooser. It shows exa
 
 The user then sets a password; successful password setup removes both one-time autologin and its narrowly scoped passwordless-sudo rule.
 
-MicroAI, MicroHermes, Browser Agent, provider settings, local-model configuration, and model/browser/Hermes state live in persistent storage. API keys are read into memory and are not written by the tools. `AI_RUN_AS_ROOT=0` is the immutable default. Privileged AI commands remain blocked until the local user runs `micro-power enable` and types exactly `ENABLE POWER MODE`; each proposed command still requires `EXECUTE`.
+MicroAI, MicroHermes, Browser Agent, provider settings, local-model configuration, and model/browser/Hermes/Brain state live in persistent storage. Credential values are never written by the tools: API keys and Gemini cookie exports live in user-owned mode-0600 files that only `micro-ai-config` manages, and only SHA-256 fingerprints of credentials appear in health state. `AI_RUN_AS_ROOT=0` is the immutable default. Privileged AI commands remain blocked until the local user runs `micro-power enable` and types exactly `ENABLE POWER MODE`; each proposed command still requires `EXECUTE`.
+
+### AI providers and auto routing
+
+`micro-ai-config` manages every provider plus the optional `auto` router (`AI_PROVIDER=auto` is the default). `AI_ROUTES=api,gemini,local` tries each route in order and falls back to the next one when a provider or credential fails.
+
+| Provider | Cost | How it is configured |
+|---|---|---|
+| `local` | free | local OpenAI-compatible server such as Ollama (default `http://127.0.0.1:11434/v1/chat/completions`) |
+| `api` | provider billing | one or many keys; the endpoint can be anything OpenAI-compatible (e.g. `router.bynara.id`); model auto-selection |
+| `gemini` | free Google account quota | one or many signed-in cookie accounts, no API key; model limited by the accounts available |
+
+**Multiple API keys.** Run `micro-ai-config` and choose `api` or `auto`, then `a` in the key manager to paste keys one per line into `~/.config/micro-ubuntu/api-keys` (mode 0600). Keys can also come from `MICRO_AI_API_KEYS` (comma/newline separated). Requests rotate through the healthy keys first, then least-recently-used; a key that fails twice is parked for 10 minutes before being retried.
+
+**Multiple Gemini accounts.** Paste each account's cookie export as its own file in `~/.config/micro-ubuntu/gemini-cookies/` (mode 0600) via `micro-ai-config` → `a` in the account manager. Each file is one account; all of them are loaded, and requests rotate accounts the same way (bad sessions are parked temporarily).
+
+**bynara router.** In `micro-ai-config`, at the `API endpoint` prompt type exactly `bynara` to set `https://router.bynara.id/v1/chat/completions`, then add the `sk-nry-...` key in the key manager. Auto routing will then prefer your router keys, fall back to Gemini sessions, then the local model.
+
+**Automatic model selection.** `AI_API_MODEL=auto` (default) asks the endpoint's `GET /v1/models` and picks a suitable model: the first match from `AI_MODEL_PREFERENCE` (comma-separated, e.g. `claude,gpt-4o-mini`), otherwise a built-in preference list, otherwise the first listed model. The choice is cached per endpoint/key and remembered across sessions; if the model list is unavailable it falls back to the last known model or `gpt-4o-mini`. For Gemini, `AI_GEMINI_MODEL=gemini-auto` (default) picks `gemini-3.6-flash` when at least one signed-in cookie account is available and `gemini-3.5-flash-lite` otherwise; models that need a signed-in session (`gemini-3.1-pro`, `gemini-3.7-flash`) are automatically downgraded with a warning if no account is available. Configure it in `micro-ai-config` (model prompt).
+
+**MicroBrain (self-developing on-device consciousness).** `AI_BRAIN=1` (default) gives every request a persistent identity, memory, and insight slice stored in `/var/lib/micro-ubuntu/brain/`. It develops itself:
+
+```bash
+micro-brain add "I installed a new SSD"   # user memory (dated)
+micro-brain learn "lesson learned"        # store an insight without AI
+micro-brain reflect                       # AI derives an insight from journal/memory
+micro-brain consolidate                   # remove duplicate memory/insight lines
+micro-brain evolve                        # AI drafts an improved identity (applied only on y)
+micro-brain recall | context | insights   # read what the brain knows
+micro-brain status                        # memory/insight/session counts
+```
+
+`micro-brain reflect` and `micro-brain evolve` use the currently configured AI provider (router, Gemini, or local), so they only work when a provider is reachable. Every `micro-ai` run also journals a session line, and setting `AI_BRAIN_LEARN=1` stores the first line of each successful answer as an insight automatically. Both `api`-style and Gemini providers receive the same brain context; it is also injected into MicroHermes conversations. Set `AI_BRAIN=0` to disable injection.
+
+**Gemini session cookies.** Export the cookies for `gemini.google.com` / `google.com` (EditThisCookie or another JSON export); `SAPISID` and `__Secure-1PSID` must be present. The Gemini provider talks to Google's unofficial web RPC (`SAPISIDHASH` authorization, per-session XSRF token, and the model header observed in the web UI), so it is experimental: it can break when Google changes the endpoint. `gemini-auto` always falls back to the web default model.
+
+Treat exported cookies exactly like a password: anyone holding them can act as the Google account. Never paste them into an AI prompt or a chat log, never put them in `ai.conf`, and if an export leaks or stops working, sign out of Google (or change the password) to invalidate it, then re-export fresh cookies.
 
 A GUI is intentionally absent initially:
 
