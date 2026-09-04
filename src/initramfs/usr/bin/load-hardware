@@ -19,6 +19,7 @@ if [ "$profile" = wifi ]; then
     iwlwifi iwldvm iwlmvm \
     ath9k ath9k_htc ath10k_pci ath10k_usb ath11k_pci \
     brcmfmac b43 bcma ssb \
+    r8188eu \
     rtw88_pci rtw88_usb rtw89_pci \
     btusb bluetooth; do
     modprobe -q "$module" 2>/dev/null || true
