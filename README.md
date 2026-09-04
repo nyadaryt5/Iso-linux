@@ -46,6 +46,7 @@ The larger initramfs includes dependency closures for, and firmware declared by,
 - Qualcomm/Atheros `ath9k`, `ath9k_htc`, `ath10k`, and `ath11k`
 - Broadcom/Cypress `brcmfmac`
 - legacy open Broadcom `b43`, `bcma`, and `ssb`
+- Realtek USB `r8188eu` support for RTL8188EU/ETV/FTV-class 802.11n dongles, including ZEB-USB150WF1 / RTL8188FTV on Ubuntu 22.04's 5.15 kernel
 - Realtek `rtw88` and `rtw89`
 - common Bluetooth USB support and Intel/Realtek/Broadcom Bluetooth firmware
 

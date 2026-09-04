@@ -110,6 +110,7 @@ wifi_modules=(
   iwlwifi iwldvm iwlmvm
   ath9k ath9k_htc ath10k_pci ath10k_usb ath11k_pci
   brcmfmac b43 bcma ssb
+  r8188eu
   rtw88_pci rtw88_usb rtw88_8723de rtw88_8723du rtw88_8821ce
   rtw88_8822be rtw88_8822ce rtw89_pci rtw89_8852ae rtw89_8852be
   btusb bluetooth

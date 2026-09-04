@@ -40,6 +40,9 @@ grep -Fq "menuentry 'MicroUbuntu - Normal installation (Ubuntu terminal system)'
 grep -Fq "console=ttyS0,115200n8 console=tty0" scripts/build-iso.sh
 grep -Fq "Type exactly INSTALL" src/initramfs/usr/bin/normal-install
 grep -Fq "verify_remote_payload \"\$IMAGE_URL\" \"\$IMAGE_SHA256\"" src/initramfs/usr/bin/normal-install
+grep -Fq 'r8188eu' scripts/build-initramfs.sh
+grep -Fq 'r8188eu' src/initramfs/usr/bin/load-hardware
+grep -Fq 'ZEB-USB150WF1 / RTL8188FTV' README.md
 grep -Fq 'AI_RUN_AS_ROOT=0' src/normal/etc/micro-ubuntu/ai.conf
 if grep -Rq '^AI_RUN_AS_ROOT=1' src config scripts; then
   echo 'Unsafe AI_RUN_AS_ROOT=1 default found.' >&2
